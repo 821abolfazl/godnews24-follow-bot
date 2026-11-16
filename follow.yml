@@ -1,0 +1,60 @@
+name: GodNews24 Follow Bot
+
+# ربات خبررسان شخصی GodNews24: اعضا با /follow موضوع انتخاب می‌کنن و خبرهای
+# مهم همون موضوع رو به‌صورت فوروارد دایرکت می‌گیرن. ریپو عمومیه تا حلقه‌ی
+# ۲۴ ساعته سقف دقیقه‌ی Actions نداشته باشه؛ followers.json رمزنگاری‌شده‌ست
+# (Fernet، کلید از FOLLOW_BOT_TOKEN) و داده‌ی دنبال‌کننده‌ها هیچ‌وقت
+# به‌صورت متن ساده توی ریپو نمی‌ره.
+
+on:
+  # ساعت‌ها به UTC هستن (تهران = UTC+3:30). ۰۵:۰۷ تا ۲۱:۲۷ UTC = ۰۸:۳۷ تا ۰۰:۵۷ تهران
+  schedule:
+    - cron: "7,27,47 5-20 * * *"
+    - cron: "3,13,23,33,43,53 5-6 * * *"   # شروع صبح: چند ماشه‌ی اضافه تا اگه گیت‌هاب یکی رو رد کرد، بقیه کار کنن
+    - cron: "7,27 21 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "manual = اجرای کامل دستی / auto = اجرای زمان‌بندی‌شده"
+        default: "manual"
+
+permissions:
+  contents: write
+  actions: write   # برای صدا زدن اجرای بعدی
+
+concurrency:
+  group: godnews-follow-bot
+  cancel-in-progress: false
+
+jobs:
+  follow-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70   # اجرای معمولی چند دقیقه‌ست؛ فقط در حالت حلقه تا حدود یک ساعت طول می‌کشه
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -q requests cryptography
+
+      - name: Run bot
+        env:
+          FOLLOW_BOT_TOKEN: ${{ secrets.FOLLOW_BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}   # شناسه‌ی چت خصوصی ادمین برای دستور /followers (Secret)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # حالت حلقه (دقیق هر ۲۰ دقیقه): در Settings ← Secrets and variables ← Actions ← Variables
+          # یک متغیر به اسم LOOP_MINUTES با مقدار 55 بساز. فقط برای repository عمومی کار می‌کنه.
+          LOOP_MINUTES: ${{ vars.LOOP_MINUTES }}
+          CHANNEL: "@GodNews24"
+        run: python follow_bot.py
+
+      - name: Save state
+        if: always()   # حتی اگه ربات خطا بده، حافظه‌ی دنبال‌کننده‌ها ذخیره بشه
+        run: |
+          git config user.name "news-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git pull --rebase --autostash || true
+          git add followers.json
+          git diff --cached --quiet || (git commit -m "update followers" && git push)
