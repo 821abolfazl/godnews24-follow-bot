@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.03"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.08"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -40,6 +40,11 @@ POLL_SECONDS = 2             # فاصله‌ی کوتاه بین دو دور؛ �
 PENDING_TIMEOUT = 600        # ثانیه؛ اگه عضو تا این مدت جواب نده، انتظار لغو می‌شه
 COMMIT_EVERY_SEC = 300       # حافظه حداکثر هر ۵ دقیقه توی گیت‌هاب کامیت می‌شه
 MEMBER_CACHE_TTL = 600       # ثانیه؛ نتیجه‌ی عضویت کانال ۱۰ دقیقه کش می‌شه
+SWEEP_INTERVAL_SEC = 24 * 3600  # هر چند وقت یک بار عضویت دنبال‌کننده‌ها چک بشه (روزی یک بار)
+SWEEP_WARN_TEXT = (
+    "سلام! 👋 تو دیگه عضو کانال GodNews24 نیستی، برای همین خبرهای مهم دیگه برات نمیاد.\n"
+    "اگه می‌خوای دوباره خبرها رو بگیری، دوباره عضو کانال شو 🙂"
+)
 SUBMIT_COOLDOWN_SEC = 60     # ثانیه؛ هر عضو حداکثر هر ۶۰ ثانیه یه خبر می‌فرسته
 MEMBER_ALLOWED = {"creator", "administrator", "member", "restricted"}
 _MEMBER_CACHE = {}           # chat_id -> (allowed, timestamp) — فقط توی حافظه، ذخیره نمی‌شه
@@ -201,27 +206,103 @@ def _check_membership(chat_id):
     return allowed
 
 
+def _sweep_followers(state):
+    """روزی یک بار عضویت همه‌ی دنبال‌کننده‌ها رو چک می‌کنه؛ کسی که از کانال
+    رفته (left/kicked) رو از لیست حذف می‌کنه و بهش هشدار می‌ده که دوباره عضو
+    بشه. خطای تلگرام = اون کاربر این دور رد می‌شه (هرگز بر اساس خطا حذف نمی‌شه).
+    ادمین هیچ‌وقت حذف نمی‌شه. True یعنی حافظه تغییر کرده."""
+    now = time.time()
+    last = float(state.get("last_sweep_ts") or 0)
+    if now - last < SWEEP_INTERVAL_SEC:
+        return False
+    state["last_sweep_ts"] = now
+    users = state.get("users", {})
+    removed = 0
+    for uid in sorted(users):
+        if uid == ADMIN_CHAT_ID:
+            continue
+        try:
+            res = api("getChatMember", chat_id=CHANNEL, user_id=uid)
+        except Exception as ex:
+            print("sweep getChatMember error:", type(ex).__name__)
+            continue
+        if not res or (res or {}).get("status", "") not in ("left", "kicked"):
+            continue
+        try:
+            send_message(uid, SWEEP_WARN_TEXT, reply_markup=join_keyboard())
+        except Exception:
+            pass
+        users.pop(uid, None)
+        removed += 1
+        time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
+    if removed:
+        print(f"sweep: {removed} follower(s) removed (left the channel)")
+    return True
+
+
 # ====== کیبوردها ======
 ADMIN_BUTTONS = [
     [{"text": "👥 دنبال‌کننده‌ها"}, {"text": "📣 پیام به اعضا"}],
     [{"text": "➕ موضوع جدید"}, {"text": "➖ حذف موضوع"}],
+    [{"text": "🔑 کلمه‌های کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}],
 ]
 
+# کیبورد موقع قدم‌های جادوگر (فقط لغو)
+CANCEL_KEYBOARD = {"keyboard": [[{"text": "❌ لغو"}]], "resize_keyboard": True}
 
-def main_keyboard(chat_id=None):
-    """کیبورد اصلی؛ برای ادمین دو ردیف دکمه‌ی ادمین هم اضافه می‌شه،
-    بقیه‌ی اعضا دقیقاً همون منوی قبلی رو می‌بینن."""
-    rows = [[{"text": TOPICS["political"]}, {"text": TOPICS["sport"]}],
-            [{"text": TOPICS["gold"]}, {"text": "📋 موضوع‌های من"}]]
+
+def _parse_keywords(text):
+    """کلمه‌های کلیدی رو از متن می‌گیره؛ با فاصله یا کاما (، ,) جدا می‌شن."""
+    return [w for w in (text or "").replace("،", " ").replace(",", " ").split() if w]
+
+
+def remove_topic_keyboard(state=None):
+    """دکمه‌های موضوع‌های سفارشی برای حذف (با 📌) + موضوع‌های اصلی حذف‌شده
+    برای برگردوندن (با ↩️)؛ اگه هیچ‌کدوم نیست None."""
+    customs = list((state or {}).get("custom_topics", {}).values())
+    disabled = [TOPICS[k] for k in (state or {}).get("disabled_topics", []) if k in TOPICS]
+    if not customs and not disabled:
+        return None
+    rows = []
+    for i in range(0, len(customs), 2):
+        rows.append([{"text": CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")}
+                     for c in customs[i:i + 2] if c.get("name")])
+    for label in disabled:
+        rows.append([{"text": "↩️ " + label}])
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def active_topics(state=None):
+    """کلید موضوع‌های اصلی که حذف نشدن (حذف‌شده‌ها توی state["disabled_topics"] هستن)."""
+    disabled = set((state or {}).get("disabled_topics", []) or [])
+    return [k for k in TOPICS if k not in disabled]
+
+
+def main_keyboard(chat_id=None, state=None):
+    """کیبورد اصلی؛ ادمین فقط دکمه‌های مدیریت رو می‌بینه
+    (موضوع جدید، دنبال‌کننده‌ها و آمار، پیام به اعضا)،
+    بقیه‌ی اعضا فقط دکمه‌های دنبال کردن موضوع رو می‌بینن.
+    موضوع اصلی حذف‌شده توی هیچ کیبوردی نمیاد."""
     if chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == ADMIN_CHAT_ID:
-        rows = rows + [list(r) for r in ADMIN_BUTTONS]
+        rows = [list(r) for r in ADMIN_BUTTONS]
+        rows.append([{"text": "❓ راهنما"}])
+        return {"keyboard": rows, "resize_keyboard": True}
+    labels = [TOPICS[k] for k in active_topics(state)]
+    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
+    my = {"text": "📋 موضوع‌های من"}
+    if rows and len(rows[-1]) < 2:
+        rows[-1].append(my)
+    else:
+        rows.append([my])
     rows.append([{"text": "❓ راهنما"}])
     return {"keyboard": rows, "resize_keyboard": True}
 
 
 def topic_keyboard(state=None):
-    rows = [[{"text": TOPICS["political"]}, {"text": TOPICS["sport"]}],
-            [{"text": TOPICS["gold"]}]]
+    act = active_topics(state)
+    rows = [[{"text": TOPICS[k]} for k in act[i:i + 2]]
+            for i in range(0, len(act), 2)]
     customs = list((state or {}).get("custom_topics", {}).values())
     for i in range(0, len(customs), 2):
         rows.append([{"text": CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")}
@@ -258,19 +339,38 @@ def leading_emoji(text):
     return ""
 
 
-def classify_post(text, custom_topics=None):
+def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
+                  removed_keywords=None):
     """موضوع‌های یه پست کانال رو برمی‌گردونه (مجموعه‌ای از کلیدهای موضوع).
     فقط پست‌های مهم/موضوع‌دار برمی‌گردن؛ پست معمولی (🔵) هیچ موضوعی نمی‌گیره.
-    موضوع‌های سفارشی با کلمه‌های کلیدی‌شون توی همون تیتر + اول متن چک می‌شن."""
+    موضوع‌های سفارشی با کلمه‌های کلیدی‌شون توی همون تیتر + اول متن چک می‌شن.
+    extra_keywords: کلمه‌های اضافه‌ای که ادمین برای موضوع‌های اصلی گذاشته؛
+    disabled: موضوع‌های اصلی حذف‌شده که اصلاً تشخیص داده نمی‌شن؛
+    removed_keywords: کلمه‌های داخلی حذف‌شده‌ی موضوع‌های اصلی."""
     t = text or ""
     head = t[:600]   # تیتر + اول متن، برای کلمه‌های کلیدی کافیه
     lead = leading_emoji(t)
     out = set()
-    if lead in ("🔴", "🚨", "🔥") or any(k in head for k in POLITICS_KW) or any(k in head for k in FLASH_KW):
+    dis = set(disabled or [])
+    extra = extra_keywords or {}
+    removed = removed_keywords or {}
+
+    def eff(base, key):
+        rem = set(removed.get(key, []))
+        return [k for k in base if k not in rem]
+
+    if "political" not in dis and (
+            lead in ("🔴", "🚨", "🔥") or any(k in head for k in eff(POLITICS_KW, "political"))
+            or any(k in head for k in eff(FLASH_KW, "political"))
+            or any(kw and kw in head for kw in extra.get("political", []))):
         out.add("political")
-    if lead == "⚽" or any(k in head for k in SPORT_KW):
+    if "sport" not in dis and (
+            lead == "⚽" or any(k in head for k in eff(SPORT_KW, "sport"))
+            or any(kw and kw in head for kw in extra.get("sport", []))):
         out.add("sport")
-    if lead == "🟡" and any(k in head for k in GOLD_KW):
+    if "gold" not in dis and lead == "🟡" and (
+            any(k in head for k in eff(GOLD_KW, "gold"))
+            or any(kw and kw in head for kw in extra.get("gold", []))):
         out.add("gold")
     for key, ct in (custom_topics or {}).items():
         if any(kw and kw in head for kw in ct.get("keywords", [])):
@@ -281,7 +381,7 @@ def classify_post(text, custom_topics=None):
 def _norm_topic(raw, custom_topics=None):
     """«🔴 سیاسی» یا «سیاسی» یا «political» یا نام موضوع سفارشی → کلید داخلی؛ وگرنه None."""
     s = (raw or "").strip()
-    s = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\s]+", "", s).strip()
+    s = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]+", "", s).strip()
     if s in TOPIC_NAMES:
         return TOPIC_NAMES[s]
     if s in TOPICS:
@@ -301,6 +401,12 @@ WELCOME_TEXT = (
     "برای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست."
 )
 
+ADMIN_WELCOME_TEXT = (
+    "سلام! 👋 این ربات خبررسان GodNews24 رو مدیریت می‌کنی.\n\n"
+    "از دکمه‌های پایین می‌تونی موضوع جدید اضافه کنی، "
+    "دنبال‌کننده‌ها و آمار رو ببینی و به اعضا پیام بدی."
+)
+
 HELP_TEXT = (
     "راهنمای ربات خبررسان GodNews24:\n\n"
     "/follow — یه موضوع رو دنبال کن (سیاسی، ورزشی، طلا و دلار)\n"
@@ -313,23 +419,27 @@ HELP_TEXT = (
     "برای استفاده از ربات، باید عضو کانال @GodNews24 باشی 🙂"
 )
 
-ADMIN_HELP_EXTRA = (
-    "\n\nدستورهای ادمین:\n"
+ADMIN_HELP_TEXT = (
+    "راهنمای مدیریت ربات خبررسان GodNews24:\n\n"
     "/followers — آمار و لیست دنبال‌کننده‌ها\n"
     "/addtopic — اضافه کردن موضوع جدید: /addtopic <نام> <کلمه‌ی کلیدی> ...\n"
     "/removetopic — حذف یه موضوع سفارشی: /removetopic <نام>\n"
+    "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)\n"
+    "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
     "/broadcast — پیام به دنبال‌کننده‌ها: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام"
 )
 
 
 def welcome_text(is_admin):
-    """متن خوش‌آمد؛ نسخه‌ی ربات فقط برای ادمین نشون داده می‌شه."""
-    return WELCOME_TEXT + f"\n\nنسخه‌ی ربات: {BOT_VERSION}" if is_admin else WELCOME_TEXT
+    """متن خوش‌آمد؛ ادمین متن مدیریت رو می‌بینه و نسخه‌ی ربات فقط برای ادمین نشون داده می‌شه."""
+    if is_admin:
+        return ADMIN_WELCOME_TEXT + f"\n\nنسخه‌ی ربات: {BOT_VERSION}"
+    return WELCOME_TEXT
 
 
 def help_text(is_admin):
-    """راهنما برای اعضا؛ دستورهای ادمین فقط برای ادمین نشون داده می‌شن."""
-    return HELP_TEXT + ADMIN_HELP_EXTRA if is_admin else HELP_TEXT
+    """راهنما؛ ادمین فقط دستورهای مدیریت رو می‌بینه، اعضا فقط دستورهای خودشون رو."""
+    return ADMIN_HELP_TEXT if is_admin else HELP_TEXT
 
 
 def _record_sender(state, chat_id, frm):
@@ -410,16 +520,16 @@ def _submit_news(state, msg, chat_id, direct_text=None):
     هیچ‌وقت برای خودش فوروارد نمی‌شن."""
     if chat_id == ADMIN_CHAT_ID:
         send_message(chat_id, "این دستور رو نمی‌شناسم. /help رو بزن تا راهنما رو ببینی.",
-                     reply_markup=main_keyboard(chat_id))
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     if not ADMIN_CHAT_ID:
-        send_message(chat_id, "ارسال خبر فعلاً ممکن نیست.", reply_markup=main_keyboard(chat_id))
+        send_message(chat_id, "ارسال خبر فعلاً ممکن نیست.", reply_markup=main_keyboard(chat_id, state))
         return True
     now = time.time()
     last = _SUBMIT_LAST.get(chat_id, 0)
     if now - last < SUBMIT_COOLDOWN_SEC:
         send_message(chat_id, "لطفاً کمی صبر کن و بعد دوباره بفرست 🙂",
-                     reply_markup=main_keyboard(chat_id))
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     _SUBMIT_LAST[chat_id] = now
     send_message(ADMIN_CHAT_ID, f"📩 خبر ارسالی از {_sender_display(msg)}")
@@ -428,7 +538,7 @@ def _submit_news(state, msg, chat_id, direct_text=None):
     else:
         forward_message_to(ADMIN_CHAT_ID, chat_id, msg.get("message_id"))
     send_message(chat_id, "خبرت رسید و برای ادمین فرستاده شد ✅",
-                 reply_markup=main_keyboard(chat_id))
+                 reply_markup=main_keyboard(chat_id, state))
     return True
 
 
@@ -443,6 +553,133 @@ def _add_custom_topic(state, name, keywords):
         return False, f"موضوع «{name}» از قبل هست."
     customs[name] = {"name": name, "keywords": list(keywords)}
     return True, f"موضوع «{name}» اضافه شد ✅\nکلمه‌های کلیدی: {', '.join(keywords)}"
+
+
+def _builtin_hardcoded(key):
+    return {"political": POLITICS_KW + FLASH_KW, "sport": SPORT_KW, "gold": GOLD_KW}.get(key, [])
+
+
+def _topic_keywords(state, key):
+    """همه‌ی کلمه‌های کلیدی فعال یه موضوع: برای موضوع اصلی، کلمه‌های داخلی
+    (به‌جز حذف‌شده‌ها) + اضافه‌شده‌ها؛ برای سفارشی، کلمه‌هاش."""
+    if key in TOPICS:
+        removed = set((state.get("topic_removed_keywords") or {}).get(key, []))
+        extras = (state.get("topic_extra_keywords") or {}).get(key, [])
+        return [kw for kw in _builtin_hardcoded(key) if kw not in removed] + list(extras)
+    ct = (state.get("custom_topics") or {}).get(key)
+    return list(ct.get("keywords", [])) if ct else []
+
+
+def _keyword_keyboard(state, key):
+    """دکمه‌های کلمه‌های کلیدی یه موضوع برای حذف (دو تا در هر ردیف) + لغو."""
+    kws = _topic_keywords(state, key)
+    rows = [[{"text": kw} for kw in kws[i:i + 2]] for i in range(0, len(kws), 2)]
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _keywords_text(state, key=None):
+    """متن لیست کلمه‌های کلیدی؛ بدون آرگومان همه‌ی موضوع‌ها، با آرگومان فقط اون موضوع."""
+    keys = [key] if key else active_topics(state) + list(state.get("custom_topics", {}))
+    lines = ["🔑 کلمه‌های کلیدی موضوع‌ها:", ""]
+    for k in keys:
+        label = TOPICS.get(k) or (CUSTOM_TOPIC_EMOJI + " " + (state.get("custom_topics", {}).get(k, {}).get("name", k)))
+        kws = _topic_keywords(state, k)
+        lines.append(f"{label}:")
+        lines.append("، ".join(kws) if kws else "—")
+        if k in TOPICS:
+            extras = (state.get("topic_extra_keywords") or {}).get(k, [])
+            removed = (state.get("topic_removed_keywords") or {}).get(k, [])
+            if extras:
+                lines.append("➕ اضافه‌شده: " + "، ".join(extras))
+            if removed:
+                lines.append("➖ حذف‌شده: " + "، ".join(removed))
+        lines.append("")
+    lines.append("موضوع‌های اصلی با ایموجی اول پست (🔴 ⚽ 🟡) هم تشخیص داده می‌شن.")
+    lines.append("برای حذف یه کلمه: /removekeyword")
+    return "\n".join(lines).rstrip()
+
+
+def _remove_keyword(state, key, kw):
+    """یه کلمه‌ی کلیدی رو از یه موضوع حذف می‌کنه؛ برمی‌گردونه (موفق؟، پیام).
+    کلمه‌ی داخلی موضوع اصلی به لیست حذف‌شده‌ها می‌ره (با /addtopic برمی‌گرده)؛
+    آخرین کلمه‌ی موضوع سفارشی قابل حذف نیست."""
+    label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+    if key in TOPICS:
+        extras = (state.get("topic_extra_keywords") or {}).get(key, [])
+        if kw in extras:
+            extras.remove(kw)
+            return True, f"«{kw}» از موضوع «{label}» حذف شد."
+        removed = state.setdefault("topic_removed_keywords", {}).setdefault(key, [])
+        if kw in removed:
+            return False, "این کلمه قبلاً حذف شده."
+        if kw in _builtin_hardcoded(key):
+            removed.append(kw)
+            return True, f"«{kw}» از موضوع «{label}» حذف شد."
+        return False, "چنین کلمه‌ای توی این موضوع نیست."
+    ct = (state.get("custom_topics") or {}).get(key)
+    if not ct:
+        return False, "چنین موضوعی نداریم."
+    kws = ct.get("keywords", [])
+    if kw not in kws:
+        return False, "چنین کلمه‌ای توی این موضوع نیست."
+    if len(kws) <= 1:
+        return False, "آخرین کلمه‌ی موضوع رو نمی‌شه حذف کرد؛ اگه موضوع رو نمی‌خوای، خود موضوع رو حذف کن."
+    kws.remove(kw)
+    return True, f"«{kw}» از موضوع «{label}» حذف شد."
+
+
+def _add_builtin_keywords(state, key, keywords):
+    """کلمه‌های کلیدی اضافه به یه موضوع اصلی اضافه می‌کنه؛
+    برمی‌گردونه (موفق؟، پیام)."""
+    if key not in TOPICS:
+        return False, "چنین موضوعی نداریم."
+    if key in (state.get("disabled_topics") or []):
+        return False, f"موضوع «{TOPICS[key]}» حذف شده؛ اول برگردونش، بعد کلمه اضافه کن."
+    hardcoded = _builtin_hardcoded(key)
+    extras = state.setdefault("topic_extra_keywords", {}).setdefault(key, [])
+    removed = (state.get("topic_removed_keywords") or {}).get(key, [])
+    restored = [kw for kw in (keywords or []) if kw and kw in removed]
+    for kw in restored:
+        removed.remove(kw)
+    new = [kw for kw in (keywords or []) if kw and kw not in extras and kw not in hardcoded]
+    if not new and not restored:
+        return False, "این کلمه‌ها از قبل بودن."
+    extras.extend(new)
+    parts = []
+    if new:
+        parts.append(f"به موضوع «{TOPICS[key]}» این کلمه‌ها اضافه شد: {', '.join(new)} ✅")
+    if restored:
+        parts.append(f"این کلمه‌ها برگشتن: {', '.join(restored)} ✅")
+    return True, "\n".join(parts)
+
+
+def _disable_builtin(state, key):
+    """یه موضوع اصلی رو حذف می‌کنه (نرم؛ قابل برگردوندن) و دنبال کردنش رو
+    از همه‌ی دنبال‌کننده‌ها درمی‌آره؛ برمی‌گردونه (موفق؟، پیام)."""
+    if key not in TOPICS:
+        return False, "چنین موضوعی نداریم."
+    disabled = state.setdefault("disabled_topics", [])
+    if key in disabled:
+        return False, f"موضوع «{TOPICS[key]}» قبلاً حذف شده."
+    disabled.append(key)
+    affected = 0
+    for u in state.get("users", {}).values():
+        if key in u.get("topics", []):
+            u["topics"].remove(key)
+            affected += 1
+    return True, f"موضوع «{TOPICS[key]}» حذف شد؛ دنبال کردن برای {affected} نفر لغو شد."
+
+
+def _restore_builtin(state, key):
+    """یه موضوع اصلی حذف‌شده رو برمی‌گردونه؛ برمی‌گردونه (موفق؟، پیام)."""
+    if key not in TOPICS:
+        return False, "چنین موضوعی نداریم."
+    disabled = state.setdefault("disabled_topics", [])
+    if key not in disabled:
+        return False, f"موضوع «{TOPICS[key]}» حذف نشده بود."
+    disabled.remove(key)
+    return True, f"موضوع «{TOPICS[key]}» برگشت ✅"
 
 
 def _remove_custom_topic(state, name):
@@ -465,9 +702,9 @@ def _remove_custom_topic(state, name):
 def _send_followers(state, chat_id):
     """آمار + لیست دنبال‌کننده‌ها رو برای ادمین می‌فرسته (فقط ادمین)."""
     if chat_id != ADMIN_CHAT_ID:
-        send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+        send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
         return True
-    keys = list(TOPICS) + list(state.get("custom_topics", {}))
+    keys = active_topics(state) + list(state.get("custom_topics", {}))
     counts = {k: 0 for k in keys}
     total = 0
     listed = []
@@ -490,7 +727,7 @@ def _send_followers(state, chat_id):
         out += "\n\n" + "\n".join(row[1] for row in listed[:30])
         if len(listed) > 30:
             out += f"\nو {len(listed) - 30} نفر دیگر"
-    send_message(chat_id, out, reply_markup=main_keyboard(chat_id))
+    send_message(chat_id, out, reply_markup=main_keyboard(chat_id, state))
     return True
 
 
@@ -536,17 +773,17 @@ def handle_message(state, msg):
     if text in ("لغو", "❌ لغو"):
         if entry:
             pending.pop(chat_id, None)
-            send_message(chat_id, "لغو شد.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "لغو شد.", reply_markup=main_keyboard(chat_id, state))
         return True
 
     if text == "/start":
         pending.pop(chat_id, None)
-        send_message(chat_id, welcome_text(chat_id == ADMIN_CHAT_ID), reply_markup=main_keyboard(chat_id))
+        send_message(chat_id, welcome_text(chat_id == ADMIN_CHAT_ID), reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/help" or text == "❓ راهنما":
         pending.pop(chat_id, None)
         send_message(chat_id, help_text(chat_id == ADMIN_CHAT_ID),
-                     reply_markup=main_keyboard(chat_id))
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/topics" or text == "📋 موضوع‌های من":
         pending.pop(chat_id, None)
@@ -555,11 +792,11 @@ def handle_message(state, msg):
         shown = [k for k in topics if k in TOPICS or k in customs]
         if not shown:
             send_message(chat_id, "هنوز هیچ موضوعی رو دنبال نمی‌کنی.\nبا /follow یه موضوع انتخاب کن 🙂",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         else:
             lines = "\n".join("• " + topic_label(state, k) for k in shown)
             send_message(chat_id, "موضوع‌هایی که دنبال می‌کنی:\n" + lines,
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/followers":
         return _send_followers(state, chat_id)
@@ -567,74 +804,133 @@ def handle_message(state, msg):
         return _send_followers(state, chat_id)
     if text == "📣 پیام به اعضا":
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
         pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-        send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id))
+        send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "➕ موضوع جدید":
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
-        pending[chat_id] = {"cmd": "/addtopic", "ts": time.time()}
-        send_message(chat_id, "نام موضوع و کلمه‌های کلیدی رو بفرست",
-                     reply_markup=main_keyboard(chat_id))
+        pending[chat_id] = {"cmd": "/addtopic", "step": "name", "ts": time.time()}
+        send_message(chat_id, "نام موضوع جدید چیه؟",
+                     reply_markup=CANCEL_KEYBOARD)
         return True
     if text == "➖ حذف موضوع":
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
-        pending[chat_id] = {"cmd": "/removetopic", "ts": time.time()}
-        send_message(chat_id, "نام موضوعی که می‌خوای حذف بشه رو بفرست:",
-                     reply_markup=main_keyboard(chat_id))
+        kb = remove_topic_keyboard(state)
+        if kb is None:
+            send_message(chat_id, "هیچ موضوع سفارشی‌ای نداری که حذفش کنی 🙂",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        pending[chat_id] = {"cmd": "/removetopic", "step": "pick", "ts": time.time()}
+        send_message(chat_id, "کدوم موضوع رو حذف کنم؟\n(موضوع حذف‌شده رو بزن تا برگرده)",
+                     reply_markup=kb)
         return True
     if text == "/addtopic" or text.startswith("/addtopic "):
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
         parts = text.split()
-        ok, reply = _add_custom_topic(state, parts[1] if len(parts) > 1 else "",
-                                      parts[2:])
-        send_message(chat_id, reply, reply_markup=main_keyboard(chat_id))
+        name_raw = parts[1] if len(parts) > 1 else ""
+        key = _norm_topic(name_raw, state.get("custom_topics", {}))
+        if key in TOPICS:
+            # موضوع اصلی: کلمه‌ی کلیدی اضافه می‌شه؛ بدون کلمه = برگردوندن
+            if key in (state.get("disabled_topics") or []):
+                ok, reply = _restore_builtin(state, key)
+                if ok and parts[2:]:
+                    _ok2, reply2 = _add_builtin_keywords(state, key, parts[2:])
+                    reply = reply + "\n" + reply2
+            elif not parts[2:]:
+                reply = (f"«{TOPICS[key]}» موضوع اصلیه؛ برای اضافه کردن کلمه‌ی کلیدی، "
+                         f"کلمه‌ها رو هم بفرست:\n/addtopic {name_raw} <کلمه> ...")
+            else:
+                ok, reply = _add_builtin_keywords(state, key, parts[2:])
+        else:
+            ok, reply = _add_custom_topic(state, name_raw, parts[2:])
+        send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/removetopic" or text.startswith("/removetopic "):
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
         parts = text.split(None, 1)
-        ok, reply = _remove_custom_topic(state, parts[1].strip() if len(parts) > 1 else "")
-        send_message(chat_id, reply, reply_markup=main_keyboard(chat_id))
+        name_raw = parts[1].strip() if len(parts) > 1 else ""
+        key = _norm_topic(name_raw, state.get("custom_topics", {}))
+        if key in TOPICS:
+            ok, reply = _disable_builtin(state, key)
+        else:
+            ok, reply = _remove_custom_topic(state, name_raw)
+        send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "/keywords" or text.startswith("/keywords ") or text == "🔑 کلمه‌های کلیدی":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        parts = text.split(None, 1)
+        key = None
+        if text.startswith("/keywords "):
+            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}))
+            if not key or (key in TOPICS and key in (state.get("disabled_topics") or [])):
+                send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
+                return True
+        send_message(chat_id, _keywords_text(state, key), reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "/removekeyword" or text.startswith("/removekeyword ") or text == "➖ حذف کلمه‌ی کلیدی":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        parts = text.split(None, 1)
+        key = None
+        if text.startswith("/removekeyword "):
+            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}))
+            if not key or key not in active_topics(state) + list(state.get("custom_topics", {})):
+                send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
+                return True
+        if key:
+            label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+            pending[chat_id] = {"cmd": "/removekeyword", "step": "keyword", "topic": key,
+                                "ts": time.time()}
+            send_message(chat_id, f"کدوم کلمه‌ی «{label}» رو حذف کنم؟",
+                         reply_markup=_keyword_keyboard(state, key))
+        else:
+            pending[chat_id] = {"cmd": "/removekeyword", "step": "topic", "ts": time.time()}
+            send_message(chat_id, "کلمه‌ی کدوم موضوع رو می‌خوای حذف کنی؟",
+                         reply_markup=topic_keyboard(state))
         return True
     if text == "/broadcast" or text.startswith("/broadcast "):
         if chat_id != ADMIN_CHAT_ID:
-            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
         if text == "/broadcast":
             pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-            send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
             return True
         arg = text.split(None, 1)[1].strip()
         topic, msg = _broadcast_target(arg, state.get("custom_topics", {}))
         if topic and not msg:
             send_message(chat_id, "متن پیام رو هم بنویس:\n/broadcast <ایموجی موضوع> <متن>",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
             return True
         if topic:
             sent, failed = _broadcast(state, msg, topic)
         else:
             sent, failed = _broadcast(state, arg)
         send_message(chat_id, f"به {sent} نفر رسید، {failed} نفر ناموفق بود.",
-                     reply_markup=main_keyboard(chat_id))
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/send" or text.startswith("/send "):
         if text == "/send":
             pending[chat_id] = {"cmd": "/send", "ts": time.time()}
-            send_message(chat_id, "خبر، عکس یا فیلمت رو بفرست 🙂", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "خبر، عکس یا فیلمت رو بفرست 🙂", reply_markup=main_keyboard(chat_id, state))
             return True
         arg = text.split(None, 1)[1].strip()
         if not arg:
             pending[chat_id] = {"cmd": "/send", "ts": time.time()}
-            send_message(chat_id, "خبر، عکس یا فیلمت رو بفرست 🙂", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "خبر، عکس یا فیلمت رو بفرست 🙂", reply_markup=main_keyboard(chat_id, state))
             return True
         return _submit_news(state, msg, chat_id, direct_text=arg)
     if text == "/follow":
@@ -645,20 +941,24 @@ def handle_message(state, msg):
         topic = _norm_topic(text.split(None, 1)[1], state.get("custom_topics", {}))
         if not topic:
             send_message(chat_id, "این موضوع رو نمی‌شناسم. موضوع‌ها: سیاسی، ورزشی، طلا و دلار",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        if topic in (state.get("disabled_topics") or []):
+            send_message(chat_id, "این موضوع حذف شده.",
+                         reply_markup=main_keyboard(chat_id, state))
             return True
         if _follow(state, chat_id, topic):
             send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         else:
             send_message(chat_id, f"قبلاً «{topic_label(state, topic)}» رو دنبال می‌کردی 🙂",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/unfollow":
         topics = state.get("users", {}).get(chat_id, {}).get("topics", [])
         if not topics:
             send_message(chat_id, "هیچ موضوعی رو دنبال نمی‌کنی که لغوش کنی 🙂",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
             return True
         pending[chat_id] = {"cmd": "/unfollow", "ts": time.time()}
         send_message(chat_id, "کدوم موضوع رو لغو کنم؟", reply_markup=unfollow_keyboard(topics, state))
@@ -667,89 +967,181 @@ def handle_message(state, msg):
         arg = text.split(None, 1)[1].strip()
         if arg == "همه":
             state.get("users", {}).get(chat_id, {})["topics"] = []
-            send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id, state))
             return True
         topic = _norm_topic(arg, state.get("custom_topics", {}))
         if not topic:
-            send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id, state))
             return True
         if _unfollow(state, chat_id, topic):
-            send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» لغو شد.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» لغو شد.", reply_markup=main_keyboard(chat_id, state))
         else:
-            send_message(chat_id, f"«{topic_label(state, topic)}» رو دنبال نمی‌کردی.", reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, f"«{topic_label(state, topic)}» رو دنبال نمی‌کردی.", reply_markup=main_keyboard(chat_id, state))
         return True
     if entry:
         # جوابِ دستوری که منتظر آرگومان بود (/follow، /unfollow، /broadcast یا /send)
         cmd = entry["cmd"]
         pending.pop(chat_id, None)
+        if cmd == "/removekeyword":
+            if entry.get("step") == "topic":
+                topic = _norm_topic(text, state.get("custom_topics", {}))
+                if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=topic_keyboard(state))
+                    pending[chat_id] = entry
+                    return True
+                label = TOPICS.get(topic) or (state.get("custom_topics", {}).get(topic, {}).get("name", topic))
+                entry["step"] = "keyword"
+                entry["topic"] = topic
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"کدوم کلمه‌ی «{label}» رو حذف کنم؟",
+                             reply_markup=_keyword_keyboard(state, topic))
+                return True
+            # قدم کلمه: متن پیام (دکمه یا تایپ) باید دقیقاً یکی از کلمه‌ها باشه
+            topic = entry.get("topic")
+            if not topic or text not in _topic_keywords(state, topic):
+                send_message(chat_id, "این کلمه توی این موضوع نیست؛ روی یکی از دکمه‌ها بزن:",
+                             reply_markup=_keyword_keyboard(state, topic))
+                pending[chat_id] = entry
+                return True
+            ok, reply = _remove_keyword(state, topic, text)
+            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+            return True
         if cmd == "/follow":
             topic = _norm_topic(text, state.get("custom_topics", {}))
             if not topic:
                 send_message(chat_id, "این موضوع رو نمی‌شناسم. موضوع‌ها: سیاسی، ورزشی، طلا و دلار",
-                             reply_markup=main_keyboard(chat_id))
+                             reply_markup=main_keyboard(chat_id, state))
+                return True
+            if topic in (state.get("disabled_topics") or []):
+                send_message(chat_id, "این موضوع حذف شده.",
+                             reply_markup=main_keyboard(chat_id, state))
                 return True
             if _follow(state, chat_id, topic):
                 send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
-                             reply_markup=main_keyboard(chat_id))
+                             reply_markup=main_keyboard(chat_id, state))
             else:
                 send_message(chat_id, f"قبلاً «{topic_label(state, topic)}» رو دنبال می‌کردی 🙂",
-                             reply_markup=main_keyboard(chat_id))
+                             reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/unfollow":
             if text == "همه":
                 state.get("users", {}).get(chat_id, {})["topics"] = []
-                send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id))
+                send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id, state))
                 return True
             topic = _norm_topic(text, state.get("custom_topics", {}))
             if not topic:
-                send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id))
+                send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id, state))
                 return True
             if _unfollow(state, chat_id, topic):
-                send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» لغو شد.", reply_markup=main_keyboard(chat_id))
+                send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» لغو شد.", reply_markup=main_keyboard(chat_id, state))
             else:
-                send_message(chat_id, f"«{topic_label(state, topic)}» رو دنبال نمی‌کردی.", reply_markup=main_keyboard(chat_id))
+                send_message(chat_id, f"«{topic_label(state, topic)}» رو دنبال نمی‌کردی.", reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/broadcast":
             if not text:
                 pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-                send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id))
+                send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
                 return True
             topic, msg = _broadcast_target(text, state.get("custom_topics", {}))
             if topic and not msg:
                 send_message(chat_id, "متن پیام رو هم بنویس:\n/broadcast <ایموجی موضوع> <متن>",
-                             reply_markup=main_keyboard(chat_id))
+                             reply_markup=main_keyboard(chat_id, state))
                 return True
             if topic:
                 sent, failed = _broadcast(state, msg, topic)
             else:
                 sent, failed = _broadcast(state, text)
             send_message(chat_id, f"به {sent} نفر رسید، {failed} نفر ناموفق بود.",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/send":
             return _submit_news(state, msg, chat_id)
         if cmd == "/addtopic":
-            parts = text.split()
-            ok, reply = _add_custom_topic(state, parts[0] if parts else "", parts[1:])
-            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id))
+            if entry.get("step") == "keywords":
+                kws = _parse_keywords(text)
+                if not kws:
+                    send_message(chat_id, "کلمه‌ی کلیدی‌ای نفرستادی؛ کلمه‌های کلیدی رو بفرست:",
+                                 reply_markup=CANCEL_KEYBOARD)
+                    pending[chat_id] = entry
+                    return True
+                if entry.get("builtin_key"):
+                    ok, reply = _add_builtin_keywords(state, entry["builtin_key"], kws)
+                else:
+                    ok, reply = _add_custom_topic(state, entry.get("name", ""), kws)
+                send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+                return True
+            if not entry.get("step"):
+                # جریان قدیمی: کل پیام «نام کلمه۱ کلمه۲ ...» بود
+                parts = text.split()
+                ok, reply = _add_custom_topic(state, parts[0] if parts else "", parts[1:])
+                send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+                return True
+            # قدم اول جادوگر: کل پیام، نام موضوعه (حتی چندکلمه‌ای)
+            name = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]+", "", text).strip()
+            key = _norm_topic(name, state.get("custom_topics", {}))
+            if key in TOPICS:
+                if key in (state.get("disabled_topics") or []):
+                    ok, reply = _restore_builtin(state, key)
+                    send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+                    return True
+                entry["step"] = "keywords"
+                entry["builtin_key"] = key
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"«{TOPICS[key]}» موضوع اصلیه؛ کلمه‌های کلیدی که می‌خوای بهش اضافه بشه رو بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                return True
+            if not name or name in state.get("custom_topics", {}):
+                send_message(chat_id, "این نام رو نمی‌شه اضافه کرد؛ یه نام دیگه بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                pending[chat_id] = entry
+                return True
+            entry["step"] = "keywords"
+            entry["name"] = name
+            entry["ts"] = time.time()
+            pending[chat_id] = entry
+            send_message(chat_id, "کلمه‌های کلیدی رو بفرست (با فاصله یا کاما جدا کن):",
+                         reply_markup=CANCEL_KEYBOARD)
             return True
         if cmd == "/removetopic":
+            if entry.get("step") == "pick":
+                topic = _norm_topic(text, state.get("custom_topics", {}))
+                if topic in (state.get("disabled_topics") or []):
+                    ok, reply = _restore_builtin(state, topic)
+                elif topic in TOPICS:
+                    ok, reply = _disable_builtin(state, topic)
+                elif topic in state.get("custom_topics", {}):
+                    ok, reply = _remove_custom_topic(state, topic)
+                else:
+                    kb = remove_topic_keyboard(state) or main_keyboard(chat_id, state)
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=kb)
+                    pending[chat_id] = entry
+                    return True
+                send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+                return True
             ok, reply = _remove_custom_topic(state, text.strip())
-            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id))
+            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
             return True
     # زدن دکمه‌ی موضوع روی کیبورد اصلی = دنبال کردن همون موضوع
     topic = _norm_topic(text, state.get("custom_topics", {}))
     if topic:
+        if topic in (state.get("disabled_topics") or []):
+            send_message(chat_id, "این موضوع حذف شده.",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
         if _follow(state, chat_id, topic):
             send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         else:
             send_message(chat_id, f"قبلاً «{topic_label(state, topic)}» رو دنبال می‌کردی 🙂",
-                         reply_markup=main_keyboard(chat_id))
+                         reply_markup=main_keyboard(chat_id, state))
         return True
     if text.startswith("/"):
         send_message(chat_id, "این دستور رو نمی‌شناسم. /help رو بزن تا راهنما رو ببینی.",
-                     reply_markup=main_keyboard(chat_id))
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     # هر پیام دیگه (متن، عکس، فیلم) = ارسال خبر برای ادمین
     return _submit_news(state, msg, chat_id)
@@ -770,7 +1162,10 @@ def handle_channel_post(state, post):
     if post_id in seen:
         return False
     text = post.get("text") or post.get("caption") or ""
-    topics = classify_post(text, state.get("custom_topics", {}))
+    topics = classify_post(text, state.get("custom_topics", {}),
+                           state.get("topic_extra_keywords", {}),
+                           state.get("disabled_topics", []),
+                           state.get("topic_removed_keywords", {}))
     seen.append(post_id)
     if not topics:
         return True   # پست معمولی: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
@@ -805,7 +1200,10 @@ def process_updates(state):
 
 def run_once():
     state = load_state()
-    if process_updates(state):
+    changed = process_updates(state)
+    if _sweep_followers(state):
+        changed = True
+    if changed:
         save_state(state)
     return state
 
