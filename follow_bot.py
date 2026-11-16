@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.10"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.11"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -57,7 +57,8 @@ TOPICS = {
     "sport": "⚽ ورزشی",
     "gold": "🟡 طلا و دلار",
 }
-# ایموجی موضوع‌های سفارشی (موضوع جدید که می‌سازی، با این ایموجی نشون داده می‌شه)
+# سنجاق فقط برای انتخاب موضوع سفارشیِ بدون ایموجی توی متن /broadcast تایپ می‌شه
+# (مثلاً «📌 سینما»)؛ توی هیچ دکمه یا لیستی نشون داده نمی‌شه.
 CUSTOM_TOPIC_EMOJI = "📌"
 TOPIC_NAMES = {
     "سیاسی": "political",
@@ -94,7 +95,7 @@ def _fernet():
 def load_state():
     """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
     state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
-             "custom_topics": {}}
+             "custom_topics": {}, "topic_forward_counts": {}}
     if not os.path.exists(STATE_FILE):
         return state
     with open(STATE_FILE, encoding="utf-8") as f:
@@ -264,7 +265,7 @@ def _parse_keywords(text):
 
 
 def remove_topic_keyboard(state=None):
-    """دکمه‌های موضوع‌های سفارشی برای حذف (با 📌) + موضوع‌های اصلی حذف‌شده
+    """دکمه‌های موضوع‌های سفارشی برای حذف + موضوع‌های اصلی حذف‌شده
     برای برگردوندن (با ↩️)؛ اگه هیچ‌کدوم نیست None."""
     customs = list((state or {}).get("custom_topics", {}).values())
     disabled = [TOPICS[k] for k in (state or {}).get("disabled_topics", []) if k in TOPICS]
@@ -272,7 +273,7 @@ def remove_topic_keyboard(state=None):
         return None
     rows = []
     for i in range(0, len(customs), 2):
-        rows.append([{"text": CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")}
+        rows.append([{"text": c.get("name", "")}
                      for c in customs[i:i + 2] if c.get("name")])
     for label in disabled:
         rows.append([{"text": "↩️ " + label}])
@@ -296,7 +297,7 @@ def main_keyboard(chat_id=None, state=None):
         rows.append([{"text": "❓ راهنما"}])
         return {"keyboard": rows, "resize_keyboard": True}
     labels = [TOPICS[k] for k in active_topics(state)]
-    labels += [CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")
+    labels += [c.get("name", "")
                for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
     rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
     my = {"text": "📋 موضوع‌های من"}
@@ -314,7 +315,7 @@ def topic_keyboard(state=None):
             for i in range(0, len(act), 2)]
     customs = list((state or {}).get("custom_topics", {}).values())
     for i in range(0, len(customs), 2):
-        rows.append([{"text": CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")}
+        rows.append([{"text": c.get("name", "")}
                      for c in customs[i:i + 2] if c.get("name")])
     rows.append([{"text": "❌ لغو"}])
     return {"keyboard": rows, "resize_keyboard": True}
@@ -329,12 +330,13 @@ def unfollow_keyboard(followed, state=None):
 
 
 def topic_label(state, key):
-    """برچسب فارسی یه موضوع (اصلی یا سفارشی)؛ اگه ناشناخته بود خود کلید."""
+    """برچسب فارسی یه موضوع (اصلی یا سفارشی)؛ اگه ناشناخته بود خود کلید.
+    موضوع سفارشی با همون نام خودش نشون داده می‌شه، بدون هیچ ایموجی اضافه."""
     if key in TOPICS:
         return TOPICS[key]
     ct = (state or {}).get("custom_topics", {}).get(key)
     if ct:
-        return CUSTOM_TOPIC_EMOJI + " " + (ct.get("name") or key)
+        return ct.get("name") or key
     return key
 
 
@@ -420,14 +422,20 @@ def _norm_topic(raw, custom_topics=None):
 
 
 # ====== دستورهای اعضا ======
-WELCOME_TEXT = (
+def _welcome_topics_lines(state=None):
+    """خط‌های موضوع‌های فعال برای متن خوش‌آمد (اصلی + سفارشی، بدون ایموجی اضافه)."""
+    lines = [TOPICS[k] for k in active_topics(state)]
+    lines += [c.get("name", "")
+              for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
+    return lines
+
+
+WELCOME_INTRO = (
     "سلام! 👋 من ربات خبررسان GodNews24 هستم.\n\n"
     "موضوع‌هایی که دوست داری رو انتخاب کن تا خبرهای مهم همون موضوع رو دایرکت برات بفرستم:\n"
-    "🔴 سیاسی\n"
-    "⚽ ورزشی\n"
-    "🟡 طلا و دلار\n\n"
-    "برای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست."
 )
+
+WELCOME_OUTRO = "\n\nبرای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست."
 
 ADMIN_WELCOME_TEXT = (
     "سلام! 👋 این ربات خبررسان GodNews24 رو مدیریت می‌کنی.\n\n"
@@ -454,15 +462,16 @@ ADMIN_HELP_TEXT = (
     "/removetopic — حذف یه موضوع سفارشی: /removetopic <نام>\n"
     "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)\n"
     "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
-    "/broadcast — پیام به دنبال‌کننده‌ها: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام"
+    "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام — برای موضوع سفارشی اولش اسم کاملش رو بنویس (مثلاً 🚨 جنگ)"
 )
 
 
-def welcome_text(is_admin):
-    """متن خوش‌آمد؛ ادمین متن مدیریت رو می‌بینه و نسخه‌ی ربات فقط برای ادمین نشون داده می‌شه."""
+def welcome_text(is_admin, state=None):
+    """متن خوش‌آمد؛ ادمین متن مدیریت رو می‌بینه و نسخه‌ی ربات فقط برای ادمین نشون داده می‌شه.
+    متن اعضا موضوع‌های فعال (اصلی + سفارشی) رو هم لیست می‌کنه."""
     if is_admin:
         return ADMIN_WELCOME_TEXT + f"\n\nنسخه‌ی ربات: {BOT_VERSION}"
-    return WELCOME_TEXT
+    return WELCOME_INTRO + "\n".join(_welcome_topics_lines(state)) + WELCOME_OUTRO
 
 
 def help_text(is_admin):
@@ -498,15 +507,32 @@ def _sender_display(msg):
     return name or "کاربر"
 
 
+def _broadcast_target_keyboard(state=None):
+    """کیبورد انتخاب گیرنده‌ی پیام به اعضا: «به همه» + هر موضوع فعال؛
+    ادمین اول گیرنده رو انتخاب می‌کنه، بعد متن پیام رو می‌فرسته."""
+    labels = [TOPICS[k] for k in active_topics(state)]
+    labels += [c.get("name", "")
+               for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
+    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
+    rows.insert(0, [{"text": "👥 به همه"}])
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
 def _broadcast_target(arg, custom_topics=None):
     """اگه متن با «ایموجی + نام موضوع» شروع بشه، (کلید موضوع، بقیه‌ی متن) رو
     برمی‌گردونه؛ وگرنه (None, کل متن) — یعنی پیام همگانی. اسم خالی موضوع
     به‌تنهایی انتخاب‌کننده نیست، پس پیامتی که با «سیاسی ...» شروع بشه به همه
-    می‌رسه، نه فقط به سیاسی‌ها. فاصله‌ی بین ایموجی و نام مهم نیست."""
+    می‌رسه، نه فقط به سیاسی‌ها. فاصله‌ی بین ایموجی و نام مهم نیست.
+    موضوع سفارشی با ایموجی اولِ اسم خودش (مثلاً «🚨 جنگ») یا با 📌 انتخاب می‌شه؛
+    موضوع سفارشی بدون ایموجی فقط با 📌 (مثلاً «📌 سینما»)."""
     s = (arg or "").strip()
     labels = [(k, v) for k, v in TOPICS.items()]
     for k, ct in (custom_topics or {}).items():
-        labels.append((k, CUSTOM_TOPIC_EMOJI + " " + (ct.get("name") or k)))
+        name = ct.get("name") or k
+        if _EMOJI_LEAD.match(name):
+            labels.append((k, name))
+        labels.append((k, CUSTOM_TOPIC_EMOJI + " " + name))
     for key, label in labels:
         for cand in (label, label.replace(" ", "")):
             if s == cand:
@@ -613,7 +639,7 @@ def _keywords_text(state, key=None):
     keys = [key] if key else active_topics(state) + list(state.get("custom_topics", {}))
     lines = ["🔑 کلمه‌های کلیدی موضوع‌ها:", ""]
     for k in keys:
-        label = TOPICS.get(k) or (CUSTOM_TOPIC_EMOJI + " " + (state.get("custom_topics", {}).get(k, {}).get("name", k)))
+        label = TOPICS.get(k) or (state.get("custom_topics", {}).get(k, {}).get("name", k))
         kws = _topic_keywords(state, k)
         lines.append(f"{label}:")
         lines.append("، ".join(kws) if kws else "—")
@@ -751,7 +777,10 @@ def _send_followers(state, chat_id):
         tstr = "، ".join(topic_label(state, k) for k in ts)
         listed.append((name.lower(), f"• {who} — {tstr}"))
     lines = "\n".join(f"{topic_label(state, k)}: {counts[k]}" for k in keys)
-    out = f"دنبال‌کننده‌ها (کل: {total} نفر):\n{lines}"
+    fcounts = state.get("topic_forward_counts", {}) or {}
+    flines = "\n".join(f"{topic_label(state, k)}: {fcounts.get(k, 0)}" for k in keys)
+    out = (f"دنبال‌کننده‌ها (کل: {total} نفر):\n{lines}\n\n"
+           f"📊 خبرهای ارسال‌شده برای هر موضوع:\n{flines}")
     if listed:
         listed.sort(key=lambda row: row[0])
         out += "\n\n" + "\n".join(row[1] for row in listed[:30])
@@ -808,7 +837,7 @@ def handle_message(state, msg):
 
     if text == "/start":
         pending.pop(chat_id, None)
-        send_message(chat_id, welcome_text(chat_id == ADMIN_CHAT_ID), reply_markup=main_keyboard(chat_id, state))
+        send_message(chat_id, welcome_text(chat_id == ADMIN_CHAT_ID, state), reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/help" or text == "❓ راهنما":
         pending.pop(chat_id, None)
@@ -836,8 +865,9 @@ def handle_message(state, msg):
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
-        pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-        send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
+        pending[chat_id] = {"cmd": "/broadcast", "step": "target", "ts": time.time()}
+        send_message(chat_id, "پیام به کی برسه؟",
+                     reply_markup=_broadcast_target_keyboard(state))
         return True
     if text == "➕ موضوع جدید":
         if chat_id != ADMIN_CHAT_ID:
@@ -937,8 +967,9 @@ def handle_message(state, msg):
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
         if text == "/broadcast":
-            pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-            send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
+            pending[chat_id] = {"cmd": "/broadcast", "step": "target", "ts": time.time()}
+            send_message(chat_id, "پیام به کی برسه؟",
+                         reply_markup=_broadcast_target_keyboard(state))
             return True
         arg = text.split(None, 1)[1].strip()
         topic, msg = _broadcast_target(arg, state.get("custom_topics", {}))
@@ -1071,17 +1102,46 @@ def handle_message(state, msg):
                 send_message(chat_id, f"«{topic_label(state, topic)}» رو دنبال نمی‌کردی.", reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/broadcast":
+            if entry.get("step") == "target":
+                if not text:
+                    send_message(chat_id, "پیام به کی برسه؟",
+                                 reply_markup=_broadcast_target_keyboard(state))
+                    pending[chat_id] = entry
+                    return True
+                if text == "👥 به همه":
+                    entry["step"] = "text"
+                    entry["topic"] = None
+                    entry["ts"] = time.time()
+                    pending[chat_id] = entry
+                    send_message(chat_id, "متن پیام رو بفرست (به همه‌ی اعضا):",
+                                 reply_markup=CANCEL_KEYBOARD)
+                    return True
+                topic = _norm_topic(text, state.get("custom_topics", {}))
+                if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=_broadcast_target_keyboard(state))
+                    pending[chat_id] = entry
+                    return True
+                entry["step"] = "text"
+                entry["topic"] = topic
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"متن پیام برای «{topic_label(state, topic)}» رو بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                return True
             if not text:
-                pending[chat_id] = {"cmd": "/broadcast", "ts": time.time()}
-                send_message(chat_id, "متن پیام رو بفرست:", reply_markup=main_keyboard(chat_id, state))
+                # قدم متن ولی متن نفرستاده (مثلاً عکس) — دوباره همون قدم رو بخواه
+                topic = entry.get("topic")
+                if topic:
+                    prompt = f"متن پیام برای «{topic_label(state, topic)}» رو بفرست:"
+                else:
+                    prompt = "متن پیام رو بفرست (به همه‌ی اعضا):"
+                send_message(chat_id, prompt, reply_markup=CANCEL_KEYBOARD)
+                pending[chat_id] = entry
                 return True
-            topic, msg = _broadcast_target(text, state.get("custom_topics", {}))
-            if topic and not msg:
-                send_message(chat_id, "متن پیام رو هم بنویس:\n/broadcast <ایموجی موضوع> <متن>",
-                             reply_markup=main_keyboard(chat_id, state))
-                return True
+            topic = entry.get("topic")
             if topic:
-                sent, failed = _broadcast(state, msg, topic)
+                sent, failed = _broadcast(state, text, topic)
             else:
                 sent, failed = _broadcast(state, text)
             send_message(chat_id, f"به {sent} نفر رسید، {failed} نفر ناموفق بود.",
@@ -1205,10 +1265,19 @@ def handle_channel_post(state, post):
         if set(u.get("topics", [])) & topics:
             targets.add(uid)
     sent = 0
+    sent_uids = set()
     for uid in sorted(targets):
         if forward_to(uid, post_id):
             sent += 1
+            sent_uids.add(uid)
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
+    if sent_uids:
+        # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
+        counts = state.setdefault("topic_forward_counts", {})
+        users = state.get("users", {})
+        for t in topics:
+            if any(t in (users.get(uid) or {}).get("topics", []) for uid in sent_uids):
+                counts[t] = counts.get(t, 0) + 1
     print(f"forwarded post {post_id} topics={sorted(topics)} to {sent} follower(s)")
     return True
 
