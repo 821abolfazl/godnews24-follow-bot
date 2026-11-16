@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.02"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.03"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -36,7 +36,7 @@ CHANNEL = os.environ.get("CHANNEL") or "@GodNews24"
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES") or 0)
 
 STATE_FILE = "followers.json"
-POLL_SECONDS = 10            # هر چند ثانیه getUpdates خونده بشه (در حالت حلقه)
+POLL_SECONDS = 2             # فاصله‌ی کوتاه بین دو دور؛ انتظار واقعی رو long polling انجام می‌ده
 PENDING_TIMEOUT = 600        # ثانیه؛ اگه عضو تا این مدت جواب نده، انتظار لغو می‌شه
 COMMIT_EVERY_SEC = 300       # حافظه حداکثر هر ۵ دقیقه توی گیت‌هاب کامیت می‌شه
 MEMBER_CACHE_TTL = 600       # ثانیه؛ نتیجه‌ی عضویت کانال ۱۰ دقیقه کش می‌شه
@@ -137,11 +137,14 @@ def api(method, **data):
 
 
 def api_get_updates(offset):
+    # long polling: تلگرام تا ۳۰ ثانیه صبر می‌کنه و به‌محض رسیدن پیام جواب می‌ده،
+    # پس دستورها تقریباً در لحظه (حدود ۱ ثانیه) جواب داده می‌شن، بدون اینکه
+    # مدام درخواست بزنیم. مهلت درخواست باید بیشتر از long-poll باشه.
     try:
         r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates",
-                         params={"offset": offset, "timeout": 0,
+                         params={"offset": offset, "timeout": 30,
                                  "allowed_updates": json.dumps(["message", "channel_post"])},
-                         timeout=20)
+                         timeout=40)
         data = r.json()
     except Exception as ex:
         print("getUpdates error:", type(ex).__name__)
