@@ -24,7 +24,7 @@ permissions:
 
 concurrency:
   group: godnews-follow-bot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   follow-bot:
@@ -55,6 +55,14 @@ jobs:
         run: |
           git config user.name "news-bot"
           git config user.email "bot@users.noreply.github.com"
-          git pull --rebase --autostash || true
-          git add followers.json
-          git diff --cached --quiet || (git commit -m "update followers" && git push)
+          if git pull --rebase --autostash; then
+            if grep -q -e '<<<<<<<' -e '>>>>>>>' followers.json; then
+              echo "merge markers found in followers.json, skipping commit"
+            else
+              git add followers.json
+              git diff --cached --quiet || (git commit -m "update followers" && git push)
+            fi
+          else
+            echo "rebase failed, skipping state commit"
+            git rebase --abort || true
+          fi
