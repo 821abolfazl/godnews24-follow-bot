@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.11"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.12"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -431,11 +431,14 @@ def _welcome_topics_lines(state=None):
 
 
 WELCOME_INTRO = (
-    "سلام! 👋 من ربات خبررسان GodNews24 هستم.\n\n"
-    "موضوع‌هایی که دوست داری رو انتخاب کن تا خبرهای مهم همون موضوع رو دایرکت برات بفرستم:\n"
+    "سلام! 👋 به ربات خبررسان GodNews24 خوش اومدی!\n\n"
+    "من ربات شخصی کانال @GodNews24 هستم؛ خبرهای مهم کانال رو دایرکت برات می‌فرستم. "
+    "موضوع‌هایی که دوست داری رو انتخاب کن تا خبرهای مهم همون موضوع برات بیاد:\n"
 )
 
-WELCOME_OUTRO = "\n\nبرای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست."
+WELCOME_OUTRO = ("\n\nبرای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست.\n"
+                 "اگه خبر، عکس یا فیلمی داری، با /send برام بفرست تا برای ادمین بره.\n"
+                 "راهنما: /help")
 
 ADMIN_WELCOME_TEXT = (
     "سلام! 👋 این ربات خبررسان GodNews24 رو مدیریت می‌کنی.\n\n"
@@ -445,25 +448,76 @@ ADMIN_WELCOME_TEXT = (
 
 HELP_TEXT = (
     "راهنمای ربات خبررسان GodNews24:\n\n"
-    "/follow — یه موضوع رو دنبال کن (سیاسی، ورزشی، طلا و دلار)\n"
-    "/unfollow — یه موضوع رو لغو کن، یا همه رو با «همه»\n"
+    "📌 این ربات چیه؟\n"
+    "ربات شخصی کانال @GodNews24؛ خبرهای مهم موضوع‌هایی که دنبال می‌کنی رو دایرکت برات می‌فرسته. "
+    "بقیه‌ی خبرها فقط توی کانال منتشر می‌شن.\n\n"
+    "/follow — دنبال کردن یه موضوع: روی دکمه‌ی موضوع بزن، یا بنویس /follow سیاسی\n"
     "/topics — موضوع‌هایی که دنبال می‌کنی\n"
+    "/unfollow — لغو دنبال کردن یه موضوع (یا «همه» برای لغو همه)\n"
     "/send — خبر، عکس یا فیلم بفرست تا برای ادمین بره\n"
-    "/help — همین راهنما\n\n"
-    "خبرهای مهم موضوع‌هایی که دنبال می‌کنی، دایرکت برات میاد؛ "
-    "بقیه‌ی خبرها فقط توی کانال @GodNews24 هستن.\n\n"
+    "/help — همین راهنما؛ برای راهنمای یه دستور خاص بنویس: /help /follow\n\n"
     "برای استفاده از ربات، باید عضو کانال @GodNews24 باشی 🙂"
 )
 
 ADMIN_HELP_TEXT = (
     "راهنمای مدیریت ربات خبررسان GodNews24:\n\n"
-    "/followers — آمار و لیست دنبال‌کننده‌ها\n"
-    "/addtopic — اضافه کردن موضوع جدید: /addtopic <نام> <کلمه‌ی کلیدی> ...\n"
+    "/followers — آمار و لیست دنبال‌کننده‌ها؛ برای هر موضوع چند نفر دنبال می‌کنن و چندتا خبر براشون ارسال شده\n"
+    "/addtopic — اضافه کردن موضوع جدید: /addtopic <نام> <کلمه‌ی کلیدی> ...؛ اگه موضوع از قبل باشه، کلمه‌ها بهش اضافه می‌شن\n"
     "/removetopic — حذف یه موضوع سفارشی: /removetopic <نام>\n"
-    "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)\n"
+    "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)؛ از همون‌جا با دکمه‌ها می‌تونی کلمه اضافه یا حذف کنی\n"
+    "/addkeyword — اضافه کردن کلمه‌ی کلیدی به یه موضوع: /addkeyword (یا /addkeyword <نام موضوع> <کلمه> ...)\n"
     "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
-    "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام — برای موضوع سفارشی اولش اسم کاملش رو بنویس (مثلاً 🚨 جنگ)"
+    "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n\n"
+    "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
 )
+
+# دستورهای اعضا (برای /help <دستور>؛ بقیه فقط برای ادمینه)
+MEMBER_COMMANDS = {"/follow", "/topics", "/unfollow", "/send", "/help"}
+
+# راهنمای جزئی هر دستور (برای /help <دستور>)
+COMMAND_HELP = {
+    "/follow": ("دنبال کردن یه موضوع:\n\n"
+                "خبرهای مهم موضوع‌هایی که دنبال می‌کنی، دایرکت برات میاد.\n\n"
+                "روش‌ها:\n"
+                "• روی دکمه‌ی موضوع توی کیبورد بزن\n"
+                "• بنویس /follow و از لیست انتخاب کن\n"
+                "• مستقیم بنویس: /follow سیاسی"),
+    "/topics": ("موضوع‌هایی که الان دنبال می‌کنی رو نشون می‌ده.\n\n"
+                "برای دیدنش بنویس /topics یا دکمه‌ی «📋 موضوع‌های من» رو بزن."),
+    "/unfollow": ("لغو دنبال کردن یه موضوع:\n\n"
+                  "• بنویس /unfollow و از لیست انتخاب کن\n"
+                  "• مستقیم بنویس: /unfollow سیاسی\n"
+                  "• برای لغو همه‌ی موضوع‌ها بنویس: «همه»"),
+    "/send": ("ارسال خبر برای ادمین:\n\n"
+              "خبر، عکس یا فیلمت رو بفرست تا برای ادمین بره؛ بعد از تایید توی کانال @GodNews24 منتشر می‌شه.\n"
+              "کافیه بنویسی /send و بعد پیامت رو بفرستی."),
+    "/help": ("راهنمای ربات.\n\n"
+              "برای راهنمای یه دستور خاص بنویس: /help /follow"),
+    "/followers": ("آمار و لیست دنبال‌کننده‌ها:\n\n"
+                   "برای هر موضوع نشون می‌ده چند نفر دنبالش می‌کنن و تا حالا چندتا خبر براشون ارسال شده.\n"
+                   "بنویس /followers یا دکمه‌ی «👥 دنبال‌کننده‌ها» رو بزن."),
+    "/addtopic": ("اضافه کردن موضوع جدید:\n\n"
+                  "• با دکمه‌ی «➕ موضوع جدید»: اول نام موضوع رو بفرست، بعد کلمه‌های کلیدی رو\n"
+                  "• مستقیم: /addtopic <نام> <کلمه‌ی کلیدی> ...\n"
+                  "• اگه موضوع از قبل باشه، کلمه‌ها بهش اضافه می‌شن؛ برای موضوع اصلی هم با همین دستور کلمه اضافه می‌شه."),
+    "/removetopic": ("حذف یه موضوع سفارشی:\n\n"
+                     "• با دکمه‌ی «➖ حذف موضوع» و انتخاب از لیست\n"
+                     "• مستقیم: /removetopic <نام>\n"
+                     "موضوع اصلی حذف‌شده رو می‌تونی از همون لیست برگردونی."),
+    "/keywords": ("لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>).\n\n"
+                  "از همون‌جا با دکمه‌های «➕ اضافه کردن کلمه‌ی کلیدی» و «➖ حذف کلمه‌ی کلیدی» می‌تونی کلمه اضافه یا حذف کنی."),
+    "/addkeyword": ("اضافه کردن کلمه‌ی کلیدی به یه موضوع:\n\n"
+                    "• بنویس /addkeyword و اول موضوع رو انتخاب کن، بعد کلمه‌ها رو بفرست\n"
+                    "• مستقیم: /addkeyword <نام موضوع> <کلمه> ...\n"
+                    "کلمه‌ها رو می‌تونی با کاما جدا کنی؛ هر کدوم می‌تونه چند کلمه باشه."),
+    "/removekeyword": ("حذف یه کلمه‌ی کلیدی:\n\n"
+                       "• بنویس /removekeyword و اول موضوع، بعد کلمه رو از لیست انتخاب کن\n"
+                       "• مستقیم: /removekeyword <نام موضوع>"),
+    "/broadcast": ("پیام به دنبال‌کننده‌ها:\n\n"
+                   "• با دکمه‌ی «📣 پیام به اعضا»: اول گیرنده رو انتخاب کن («👥 به همه» یا یه موضوع)، بعد متن رو بفرست\n"
+                   "• مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام\n"
+                   "• برای موضوع سفارشی اولش اسم کاملش رو بنویس (مثلاً 🚨 جنگ)"),
+}
 
 
 def welcome_text(is_admin, state=None):
@@ -474,8 +528,16 @@ def welcome_text(is_admin, state=None):
     return WELCOME_INTRO + "\n".join(_welcome_topics_lines(state)) + WELCOME_OUTRO
 
 
-def help_text(is_admin):
-    """راهنما؛ ادمین فقط دستورهای مدیریت رو می‌بینه، اعضا فقط دستورهای خودشون رو."""
+def help_text(is_admin, arg=None):
+    """راهنما؛ ادمین فقط دستورهای مدیریت رو می‌بینه، اعضا فقط دستورهای خودشون رو.
+    با آرگومان (/help <دستور>) راهنمای جزئی همون دستور رو می‌ده."""
+    if arg:
+        cmd = "/" + arg.lstrip("/").split()[0]
+        detail = COMMAND_HELP.get(cmd)
+        if detail:
+            if is_admin or cmd in MEMBER_COMMANDS:
+                return detail
+            return "این دستور فقط برای ادمینه."
     return ADMIN_HELP_TEXT if is_admin else HELP_TEXT
 
 
@@ -710,6 +772,33 @@ def _add_builtin_keywords(state, key, keywords):
     return True, "\n".join(parts)
 
 
+def _add_custom_keywords(state, key, keywords):
+    """کلمه‌های کلیدی به یه موضوع سفارشی اضافه می‌کنه؛
+    برمی‌گردونه (موفق؟، پیام). کلمه‌های تکراری نادیده گرفته می‌شن."""
+    ct = (state.get("custom_topics") or {}).get(key)
+    if not ct:
+        return False, "چنین موضوعی نداریم."
+    kws = ct.setdefault("keywords", [])
+    added = [kw for kw in (keywords or []) if kw and kw not in kws]
+    if not added:
+        return False, "این کلمه‌ها از قبل توی این موضوع هستن."
+    kws.extend(added)
+    label = ct.get("name") or key
+    return True, f"به موضوع «{label}» این کلمه‌ها اضافه شد: {', '.join(added)} ✅"
+
+
+def _keywords_keyboard(state=None):
+    """کیبورد خروجی /keywords: اول دو عمل کلمه‌ی کلیدی (اضافه و حذف)، بعد منوی مدیریت.
+    دکمه‌ی حذف تکراری نمی‌شه (از منو حذف می‌شه چون بالای لیست هست)."""
+    rows = [[{"text": "➕ اضافه کردن کلمه‌ی کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}]]
+    for r in ADMIN_BUTTONS:
+        kept = [b for b in r if b["text"] != "➖ حذف کلمه‌ی کلیدی"]
+        if kept:
+            rows.append(list(kept))
+    rows.append([{"text": "❓ راهنما"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
 def _disable_builtin(state, key):
     """یه موضوع اصلی رو حذف می‌کنه (نرم؛ قابل برگردوندن) و دنبال کردنش رو
     از همه‌ی دنبال‌کننده‌ها درمی‌آره؛ برمی‌گردونه (موفق؟، پیام)."""
@@ -839,9 +928,10 @@ def handle_message(state, msg):
         pending.pop(chat_id, None)
         send_message(chat_id, welcome_text(chat_id == ADMIN_CHAT_ID, state), reply_markup=main_keyboard(chat_id, state))
         return True
-    if text == "/help" or text == "❓ راهنما":
+    if text == "/help" or text.startswith("/help ") or text == "❓ راهنما":
         pending.pop(chat_id, None)
-        send_message(chat_id, help_text(chat_id == ADMIN_CHAT_ID),
+        arg = text.split(None, 1)[1].strip() if text.startswith("/help ") else None
+        send_message(chat_id, help_text(chat_id == ADMIN_CHAT_ID, arg),
                      reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/topics" or text == "📋 موضوع‌های من":
@@ -911,7 +1001,16 @@ def handle_message(state, msg):
             else:
                 ok, reply = _add_builtin_keywords(state, key, kws)
         else:
-            ok, reply = _add_custom_topic(state, name_raw, kws)
+            existing = _norm_topic(name_raw, state.get("custom_topics", {}))
+            if existing in (state.get("custom_topics", {}) or {}):
+                if kws:
+                    ok, reply = _add_custom_keywords(state, existing, kws)
+                else:
+                    ok, reply = False, (f"موضوع «{name_raw}» از قبل هست؛ "
+                                         f"برای اضافه کردن کلمه‌ی کلیدی، کلمه‌ها رو هم بفرست:\n"
+                                         f"/addtopic {name_raw} <کلمه> ...")
+            else:
+                ok, reply = _add_custom_topic(state, name_raw, kws)
         send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/removetopic" or text.startswith("/removetopic "):
@@ -938,7 +1037,7 @@ def handle_message(state, msg):
             if not key or (key in TOPICS and key in (state.get("disabled_topics") or [])):
                 send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
                 return True
-        send_message(chat_id, _keywords_text(state, key), reply_markup=main_keyboard(chat_id, state))
+        send_message(chat_id, _keywords_text(state, key), reply_markup=_keywords_keyboard(state))
         return True
     if text == "/removekeyword" or text.startswith("/removekeyword ") or text == "➖ حذف کلمه‌ی کلیدی":
         if chat_id != ADMIN_CHAT_ID:
@@ -961,6 +1060,34 @@ def handle_message(state, msg):
             pending[chat_id] = {"cmd": "/removekeyword", "step": "topic", "ts": time.time()}
             send_message(chat_id, "کلمه‌ی کدوم موضوع رو می‌خوای حذف کنی؟",
                          reply_markup=topic_keyboard(state))
+        return True
+    if text == "/addkeyword" or text.startswith("/addkeyword ") or text == "➕ اضافه کردن کلمه‌ی کلیدی":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        if text == "/addkeyword" or text == "➕ اضافه کردن کلمه‌ی کلیدی":
+            pending[chat_id] = {"cmd": "/addkeyword", "step": "topic", "ts": time.time()}
+            send_message(chat_id, "کلمه رو به کدوم موضوع اضافه کنم؟",
+                         reply_markup=topic_keyboard(state))
+            return True
+        parts = text.split(None, 2)
+        key = _norm_topic(parts[1].strip(), state.get("custom_topics", {})) if len(parts) > 1 else None
+        if not key or key not in active_topics(state) + list(state.get("custom_topics", {})):
+            send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        kws = _parse_keywords(parts[2]) if len(parts) > 2 else []
+        if not kws:
+            label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+            pending[chat_id] = {"cmd": "/addkeyword", "step": "keywords", "topic": key,
+                                "ts": time.time()}
+            send_message(chat_id, f"کلمه‌های کلیدی جدید برای «{label}» رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
+                         reply_markup=CANCEL_KEYBOARD)
+            return True
+        if key in TOPICS:
+            ok, reply = _add_builtin_keywords(state, key, kws)
+        else:
+            ok, reply = _add_custom_keywords(state, key, kws)
+        send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/broadcast" or text.startswith("/broadcast "):
         if chat_id != ADMIN_CHAT_ID:
@@ -1068,6 +1195,36 @@ def handle_message(state, msg):
                 pending[chat_id] = entry
                 return True
             ok, reply = _remove_keyword(state, topic, text)
+            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+            return True
+        if cmd == "/addkeyword":
+            if entry.get("step") == "topic":
+                topic = _norm_topic(text, state.get("custom_topics", {}))
+                if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=topic_keyboard(state))
+                    pending[chat_id] = entry
+                    return True
+                label = TOPICS.get(topic) or (state.get("custom_topics", {}).get(topic, {}).get("name", topic))
+                entry["step"] = "keywords"
+                entry["topic"] = topic
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"کلمه‌های کلیدی جدید برای «{label}» رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
+                             reply_markup=CANCEL_KEYBOARD)
+                return True
+            # قدم کلمه: کلمه‌های جدید رو به موضوع اضافه می‌کنه
+            topic = entry.get("topic")
+            kws = _parse_keywords(text)
+            if not topic or not kws:
+                send_message(chat_id, "کلمه‌ی کلیدی‌ای نفرستادی؛ کلمه‌های کلیدی رو بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                pending[chat_id] = entry
+                return True
+            if topic in TOPICS:
+                ok, reply = _add_builtin_keywords(state, topic, kws)
+            else:
+                ok, reply = _add_custom_keywords(state, topic, kws)
             send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/follow":
