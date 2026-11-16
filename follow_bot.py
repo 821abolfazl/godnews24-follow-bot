@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.15"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.16"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -1774,7 +1774,10 @@ def run_once():
 
 # ====== گیت‌هاب: کامیت حافظه + صدا زدن اجرای بعدی ======
 def commit_state():
-    """حافظه‌ی رمزنگاری‌شده رو توی گیت‌هاب کامیت می‌کنه (فقط وقتی توی Actions هستیم)."""
+    """حافظه‌ی رمزنگاری‌شده رو توی گیت‌هاب کامیت می‌کنه (فقط وقتی توی Actions هستیم).
+    اگه pull با تداخل مواجه بشه، یا فایل نشونه‌های تداخل داشته باشه، یا رمزگشایی
+    نشه، این دور کامیت نمی‌شه — فایل خراب هیچ‌وقت کامیت نمی‌شه؛ همون خطایی که
+    ربات رو از کار می‌نداخت (فایل درگیرِ تداخل رمزگشایی نمی‌شه)."""
     if not os.environ.get("GITHUB_ACTIONS"):
         return
     def git(*args):
@@ -1784,7 +1787,23 @@ def commit_state():
         git("config", "user.email", "bot@users.noreply.github.com")
         _pull = git("pull", "--rebase", "--autostash")
         if _pull.returncode != 0:
-            print("git pull --rebase failed (ignored):", (_pull.stderr or "")[:200])
+            print("git pull --rebase failed, skipping state commit")
+            git("rebase", "--abort")
+            return
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            print("followers.json not found, skipping state commit")
+            return
+        if "<<<<<<<" in content or ">>>>>>>" in content:
+            print("merge markers found in followers.json, skipping commit")
+            return
+        try:
+            _fernet().decrypt(content.strip().encode("utf-8"))
+        except Exception:
+            print("followers.json does not decrypt, skipping commit")
+            return
         git("add", STATE_FILE)
         if git("diff", "--cached", "--quiet").returncode != 0:
             git("commit", "-m", "update followers")
