@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.09"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.10"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -296,6 +296,8 @@ def main_keyboard(chat_id=None, state=None):
         rows.append([{"text": "❓ راهنما"}])
         return {"keyboard": rows, "resize_keyboard": True}
     labels = [TOPICS[k] for k in active_topics(state)]
+    labels += [CUSTOM_TOPIC_EMOJI + " " + c.get("name", "")
+               for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
     rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
     my = {"text": "📋 موضوع‌های من"}
     if rows and len(rows[-1]) < 2:
@@ -1107,8 +1109,8 @@ def handle_message(state, msg):
                 ok, reply = _add_custom_topic(state, parts[0] if parts else "", parts[1:])
                 send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
                 return True
-            # قدم اول جادوگر: کل پیام، نام موضوعه (حتی چندکلمه‌ای)
-            name = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]+", "", text).strip()
+            # قدم اول جادوگر: کل پیام، نام موضوعه (حتی چندکلمه‌ای و حتی با ایموجی اولش)
+            name = text.strip()
             key = _norm_topic(name, state.get("custom_topics", {}))
             if key in TOPICS:
                 if key in (state.get("disabled_topics") or []):
