@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.16"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.17"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -344,21 +344,14 @@ def active_topics(state=None):
 def main_keyboard(chat_id=None, state=None):
     """کیبورد اصلی؛ ادمین فقط دکمه‌های مدیریت رو می‌بینه
     (موضوع جدید، دنبال‌کننده‌ها و آمار، پیام به اعضا)،
-    بقیه‌ی اعضا فقط دکمه‌های دنبال کردن موضوع رو می‌بینن.
+    بقیه‌ی اعضا دکمه‌ی «📌 انتخاب موضوع» رو می‌بینن (موضوع‌ها داخل اونن).
     موضوع اصلی حذف‌شده توی هیچ کیبوردی نمیاد."""
     if chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == ADMIN_CHAT_ID:
         rows = [list(r) for r in ADMIN_BUTTONS]
         rows.append([{"text": "❓ راهنما"}])
         return {"keyboard": rows, "resize_keyboard": True}
-    labels = [topic_label(state, k) for k in active_topics(state)]
-    labels += [c.get("name", "")
-               for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
-    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
-    my = {"text": "📋 موضوع‌های من"}
-    if rows and len(rows[-1]) < 2:
-        rows[-1].append(my)
-    else:
-        rows.append([my])
+    rows = [[{"text": "📌 انتخاب موضوع"}]]
+    rows.append([{"text": "📋 موضوع‌های من"}])
     rows.append([{"text": "🗑 پاک کردن همه‌ی خبرها"}])
     rows.append([{"text": "❓ راهنما"}])
     return {"keyboard": rows, "resize_keyboard": True}
@@ -374,6 +367,38 @@ def topic_keyboard(state=None):
                      for c in customs[i:i + 2] if c.get("name")])
     rows.append([{"text": "❌ لغو"}])
     return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _select_topics_keyboard(state, chat_id):
+    """کیبورد «انتخاب موضوع»: همه‌ی موضوع‌های فعال؛ دنبال‌شده‌ها با ✅.
+    زدن هر موضوع دنبال کردن رو روشن/خاموش می‌کنه (تاگل)؛ اگه موضوعی نیست None."""
+    followed = set((state or {}).get("users", {}).get(str(chat_id), {}).get("topics", []))
+    labels = []
+    for k in active_topics(state):
+        label = topic_label(state, k)
+        labels.append(("✅ " + label) if k in followed else label)
+    for c in (state or {}).get("custom_topics", {}).values():
+        name = c.get("name", "")
+        if not name:
+            continue
+        labels.append(("✅ " + name) if name in followed else name)
+    if not labels:
+        return None
+    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _open_select_picker(state, chat_id, prompt):
+    """پیام «انتخاب موضوع» رو با کیبورد تیک‌دار می‌فرسته؛ اگه موضوعی نباشه False."""
+    kb = _select_topics_keyboard(state, chat_id)
+    if kb is None:
+        send_message(chat_id, "هنوز موضوعی نیست 🙂",
+                     reply_markup=main_keyboard(chat_id, state))
+        return False
+    state.setdefault("pending", {})[chat_id] = {"cmd": "/select", "ts": time.time()}
+    send_message(chat_id, prompt, reply_markup=kb)
+    return True
 
 
 def unfollow_keyboard(followed, state=None):
@@ -498,7 +523,7 @@ WELCOME_INTRO = (
     "موضوع‌هایی که دوست داری رو انتخاب کن تا خبرهای مهم همون موضوع برات بیاد:\n"
 )
 
-WELCOME_OUTRO = ("\n\nبرای دنبال کردن، روی یه موضوع بزن یا /follow رو بفرست.\n"
+WELCOME_OUTRO = ("\n\nبرای دنبال کردن، دکمه‌ی «📌 انتخاب موضوع» رو بزن یا /follow رو بفرست.\n"
                  "اگه خبر، عکس یا فیلمی داری، با /send برام بفرست تا برای ادمین بره.\n"
                  "راهنما: /help")
 
@@ -514,7 +539,8 @@ HELP_TEXT = (
     "📌 این ربات چیه؟\n"
     "ربات شخصی کانال @GodNews24؛ خبرهای مهم موضوع‌هایی که دنبال می‌کنی رو دایرکت برات می‌فرسته. "
     "بقیه‌ی خبرها فقط توی کانال منتشر می‌شن.\n\n"
-    "/follow — دنبال کردن یه موضوع: روی دکمه‌ی موضوع بزن، یا بنویس /follow سیاسی\n"
+    "/select — انتخاب موضوع‌ها: دکمه‌ی «📌 انتخاب موضوع» رو بزن؛ موضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه\n"
+    "/follow — دنبال کردن مستقیم یه موضوع: بنویس /follow سیاسی\n"
     "/topics — موضوع‌هایی که دنبال می‌کنی\n"
     "/unfollow — لغو دنبال کردن یه موضوع (یا «همه» برای لغو همه)\n"
     "/send — خبر، عکس یا فیلم بفرست تا برای ادمین بره\n"
@@ -538,16 +564,18 @@ ADMIN_HELP_TEXT = (
 )
 
 # دستورهای اعضا (برای /help <دستور>؛ بقیه فقط برای ادمینه)
-MEMBER_COMMANDS = {"/follow", "/topics", "/unfollow", "/send", "/clear", "/help"}
+MEMBER_COMMANDS = {"/follow", "/select", "/topics", "/unfollow", "/send", "/clear", "/help"}
 
 # راهنمای جزئی هر دستور (برای /help <دستور>)
 COMMAND_HELP = {
     "/follow": ("دنبال کردن یه موضوع:\n\n"
                 "خبرهای مهم موضوع‌هایی که دنبال می‌کنی، دایرکت برات میاد.\n\n"
                 "روش‌ها:\n"
-                "• روی دکمه‌ی موضوع توی کیبورد بزن\n"
-                "• بنویس /follow و از لیست انتخاب کن\n"
+                "• دکمه‌ی «📌 انتخاب موضوع» رو بزن و از لیست انتخاب کن\n"
                 "• مستقیم بنویس: /follow سیاسی"),
+    "/select": ("انتخاب موضوع‌ها:\n\n"
+                "دکمه‌ی «📌 انتخاب موضوع» رو بزن؛ همه‌ی موضوع‌ها توی یه لیست میان و موضوع‌هایی که دنبال می‌کنی ✅ دارن.\n"
+                "زدن یه موضوع دنبال کردنش رو روشن می‌کنه و زدن دوباره‌ش لغوش می‌کنه."),
     "/topics": ("موضوع‌هایی که الان دنبال می‌کنی رو نشون می‌ده.\n\n"
                 "برای دیدنش بنویس /topics یا دکمه‌ی «📋 موضوع‌های من» رو بزن."),
     "/unfollow": ("لغو دنبال کردن یه موضوع:\n\n"
@@ -1158,6 +1186,11 @@ def handle_message(state, msg):
         send_message(chat_id, "منوی اصلی:",
                      reply_markup=main_keyboard(chat_id, state))
         return True
+    if text == "📌 انتخاب موضوع" or text == "/select":
+        pending.pop(chat_id, None)
+        _open_select_picker(state, chat_id,
+                            "موضوع‌هایی که می‌خوای دنبال کنی رو انتخاب کن؛\nموضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه:")
+        return True
     if text == "/followers":
         return _send_followers(state, chat_id)
     if text == "👥 دنبال‌کننده‌ها":
@@ -1384,8 +1417,7 @@ def handle_message(state, msg):
             return True
         return _submit_news(state, msg, chat_id, direct_text=arg)
     if text == "/follow":
-        pending[chat_id] = {"cmd": "/follow", "ts": time.time()}
-        send_message(chat_id, "کدوم موضوع رو می‌خوای دنبال کنی؟", reply_markup=topic_keyboard(state))
+        _open_select_picker(state, chat_id, "کدوم موضوع رو می‌خوای دنبال کنی؟")
         return True
     if text.startswith("/follow "):
         topic = _norm_topic(text.split(None, 1)[1], state.get("custom_topics", {}), state.get("topic_labels", {}))
@@ -1489,23 +1521,33 @@ def handle_message(state, msg):
                 ok, reply = _add_custom_keywords(state, topic, kws)
             send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
             return True
-        if cmd == "/follow":
-            topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
-            if not topic:
-                topics_list = "، ".join(topic_label(state, k) for k in active_topics(state))
-                send_message(chat_id, f"این موضوع رو نمی‌شناسم. موضوع‌ها: {topics_list}",
-                             reply_markup=main_keyboard(chat_id, state))
+        if cmd == "/select":
+            # زدن یه موضوع توی «انتخاب موضوع»: دنبال کردن روشن/خاموش می‌شه (تاگل)
+            t = text[2:].strip() if text.startswith("✅ ") else text
+            topic = _norm_topic(t, state.get("custom_topics", {}), state.get("topic_labels", {}))
+            if not topic or (topic not in TOPICS and topic not in state.get("custom_topics", {})):
+                send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                             reply_markup=_select_topics_keyboard(state, chat_id)
+                             or main_keyboard(chat_id, state))
+                pending[chat_id] = entry
                 return True
             if topic in (state.get("disabled_topics") or []):
                 send_message(chat_id, "این موضوع حذف شده.",
-                             reply_markup=main_keyboard(chat_id, state))
+                             reply_markup=_select_topics_keyboard(state, chat_id)
+                             or main_keyboard(chat_id, state))
+                pending[chat_id] = entry
                 return True
-            if _follow(state, chat_id, topic):
-                send_message(chat_id, f"دنبال کردن «{topic_label(state, topic)}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
-                             reply_markup=main_keyboard(chat_id, state))
+            entry["ts"] = time.time()
+            pending[chat_id] = entry
+            label = topic_label(state, topic)
+            if topic in (state.get("users", {}).get(chat_id, {}).get("topics", [])):
+                _unfollow(state, chat_id, topic)
+                send_message(chat_id, f"دنبال کردن «{label}» لغو شد.",
+                             reply_markup=_select_topics_keyboard(state, chat_id))
             else:
-                send_message(chat_id, f"قبلاً «{topic_label(state, topic)}» رو دنبال می‌کردی 🙂",
-                             reply_markup=main_keyboard(chat_id, state))
+                _follow(state, chat_id, topic)
+                send_message(chat_id, f"دنبال کردن «{label}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
+                             reply_markup=_select_topics_keyboard(state, chat_id))
             return True
         if cmd == "/unfollow":
             if text == "همه":
