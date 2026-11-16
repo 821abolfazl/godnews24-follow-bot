@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.14"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.15"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -111,7 +111,8 @@ def _fernet():
 def load_state():
     """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
     state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
-             "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {}}
+             "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {},
+             "sent_messages": {}}
     if not os.path.exists(STATE_FILE):
         return state
     with open(STATE_FILE, encoding="utf-8") as f:
@@ -131,6 +132,8 @@ def load_state():
 def save_state(state):
     """حافظه رو رمزنگاری‌شده توی followers.json می‌نویسه. بدون توکن، اصلاً فایل نمی‌سازه."""
     state["seen_posts"] = state.get("seen_posts", [])[-500:]
+    for lst in state.get("sent_messages", {}).values():
+        del lst[:-SENT_MESSAGES_CAP]
     plain = json.dumps(state, ensure_ascii=False).encode("utf-8")
     token = _fernet().encrypt(plain).decode("ascii")
     with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -192,6 +195,20 @@ def forward_message_to(chat_id, from_chat_id, message_id):
     """یه پیام عضو رو (متن/عکس/فیلم) همون‌طور که هست فوروارد می‌کنه."""
     return api("forwardMessage", chat_id=chat_id, from_chat_id=from_chat_id,
                message_id=message_id)
+
+
+SENT_MESSAGES_CAP = 300   # برای هر کاربر، حداکثر چند آیدی پیام خبری نگه داشته بشه
+
+
+def _record_sent(state, chat_id, message_id):
+    """آیدی پیام خبری که برای کاربر فرستاده شده رو ذخیره می‌کنه
+    تا /clear بتونه پاکش کنه؛ فقط جدیدترین‌ها نگه داشته می‌شن."""
+    if not message_id:
+        return
+    sent = state.setdefault("sent_messages", {})
+    lst = sent.setdefault(str(chat_id), [])
+    lst.append(message_id)
+    del lst[:-SENT_MESSAGES_CAP]
 
 
 # ====== عضویت کانال (دروازه‌ی ربات) ======
@@ -261,7 +278,7 @@ def _sweep_followers(state):
 ADMIN_BUTTONS = [
     [{"text": "👥 دنبال‌کننده‌ها"}, {"text": "📣 پیام به اعضا"}],
     [{"text": "🔧 تغییرات موضوع"}],
-    [{"text": "🔑 کلمه‌های کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}],
+    [{"text": "🔑 کلمه‌های کلیدی"}],
 ]
 
 # کیبورد موقع قدم‌های جادوگر (فقط لغو)
@@ -342,6 +359,7 @@ def main_keyboard(chat_id=None, state=None):
         rows[-1].append(my)
     else:
         rows.append([my])
+    rows.append([{"text": "🗑 پاک کردن همه‌ی خبرها"}])
     rows.append([{"text": "❓ راهنما"}])
     return {"keyboard": rows, "resize_keyboard": True}
 
@@ -500,6 +518,7 @@ HELP_TEXT = (
     "/topics — موضوع‌هایی که دنبال می‌کنی\n"
     "/unfollow — لغو دنبال کردن یه موضوع (یا «همه» برای لغو همه)\n"
     "/send — خبر، عکس یا فیلم بفرست تا برای ادمین بره\n"
+    "/clear — پاک کردن همه‌ی خبرهایی که ربات برات فرستاده\n"
     "/help — همین راهنما؛ برای راهنمای یه دستور خاص بنویس: /help /follow\n\n"
     "برای استفاده از ربات، باید عضو کانال @GodNews24 باشی 🙂"
 )
@@ -519,7 +538,7 @@ ADMIN_HELP_TEXT = (
 )
 
 # دستورهای اعضا (برای /help <دستور>؛ بقیه فقط برای ادمینه)
-MEMBER_COMMANDS = {"/follow", "/topics", "/unfollow", "/send", "/help"}
+MEMBER_COMMANDS = {"/follow", "/topics", "/unfollow", "/send", "/clear", "/help"}
 
 # راهنمای جزئی هر دستور (برای /help <دستور>)
 COMMAND_HELP = {
@@ -538,6 +557,9 @@ COMMAND_HELP = {
     "/send": ("ارسال خبر برای ادمین:\n\n"
               "خبر، عکس یا فیلمت رو بفرست تا برای ادمین بره؛ بعد از تایید توی کانال @GodNews24 منتشر می‌شه.\n"
               "کافیه بنویسی /send و بعد پیامت رو بفرستی."),
+    "/clear": ("پاک کردن همه‌ی خبرها:\n\n"
+               "همه‌ی خبرهایی که ربات تا حالا برات فرستاده (خبرهای موضوع‌ها و پیام‌های ادمین) از چتت پاک می‌شن.\n\n"
+               "بنویس /clear یا دکمه‌ی «🗑 پاک کردن همه‌ی خبرها» رو بزن."),
     "/help": ("راهنمای ربات.\n\n"
               "برای راهنمای یه دستور خاص بنویس: /help /follow"),
     "/followers": ("آمار و لیست دنبال‌کننده‌ها:\n\n"
@@ -682,8 +704,32 @@ def _broadcast(state, text, topic=None):
             failed += 1
         else:
             sent += 1
+            _record_sent(state, uid, res.get("message_id"))
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
     return sent, failed
+
+
+def _clear_news(state, chat_id):
+    """همه‌ی خبرهایی که ربات برای این کاربر فرستاده (فورواردهای کانال و
+    پیام‌های ادمین) رو از چتش پاک می‌کنه؛ برمی‌گردونه (تعداد پاک‌شده،
+    تعداد ناموفق). پیام‌هایی که دیگه قابل پاک کردن نیستن (مثلاً کاربر
+    خودش پاکشون کرده) فقط شمرده می‌شن و لیست خالی می‌شه."""
+    ids = (state.get("sent_messages") or {}).get(str(chat_id), [])
+    if not ids:
+        return 0, 0
+    deleted = failed = 0
+    for mid in ids:
+        try:
+            res = api("deleteMessage", chat_id=chat_id, message_id=mid)
+        except Exception:
+            res = None
+        if res is None:
+            failed += 1
+        else:
+            deleted += 1
+        time.sleep(0.05)
+    state.setdefault("sent_messages", {})[str(chat_id)] = []
+    return deleted, failed
 
 
 def _submit_news(state, msg, chat_id, direct_text=None):
@@ -845,14 +891,10 @@ def _add_custom_keywords(state, key, keywords):
 
 
 def _keywords_keyboard(state=None):
-    """کیبورد خروجی /keywords: اول دو عمل کلمه‌ی کلیدی (اضافه و حذف)، بعد منوی مدیریت.
-    دکمه‌ی حذف تکراری نمی‌شه (از منو حذف می‌شه چون بالای لیست هست)."""
-    rows = [[{"text": "➕ اضافه کردن کلمه‌ی کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}]]
-    for r in ADMIN_BUTTONS:
-        kept = [b for b in r if b["text"] != "➖ حذف کلمه‌ی کلیدی"]
-        if kept:
-            rows.append(list(kept))
-    rows.append([{"text": "❓ راهنما"}])
+    """کیبورد خروجی /keywords: فقط دو عمل کلمه‌ی کلیدی (اضافه و حذف)
+    + بازگشت به منوی اصلی؛ بقیه‌ی دستورهای مدیریت اینجا نیستن."""
+    rows = [[{"text": "➕ اضافه کردن کلمه‌ی کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}],
+            [{"text": "🔙 منوی اصلی"}]]
     return {"keyboard": rows, "resize_keyboard": True}
 
 
@@ -1098,6 +1140,23 @@ def handle_message(state, msg):
             lines = "\n".join("• " + topic_label(state, k) for k in shown)
             send_message(chat_id, "موضوع‌هایی که دنبال می‌کنی:\n" + lines,
                          reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "/clear" or text == "🗑 پاک کردن همه‌ی خبرها":
+        pending.pop(chat_id, None)
+        deleted, failed = _clear_news(state, chat_id)
+        if deleted == 0 and failed == 0:
+            send_message(chat_id, "خبری برای پاک کردن نیست 🙂",
+                         reply_markup=main_keyboard(chat_id, state))
+        else:
+            reply = f"✅ {deleted} خبر پاک شد."
+            if failed:
+                reply += f"\n{failed} خبر دیگه قابل پاک کردن نبود (مثلاً قبلاً پاک شده بود)."
+            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "🔙 منوی اصلی":
+        pending.pop(chat_id, None)
+        send_message(chat_id, "منوی اصلی:",
+                     reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/followers":
         return _send_followers(state, chat_id)
@@ -1670,9 +1729,11 @@ def handle_channel_post(state, post):
     sent = 0
     sent_uids = set()
     for uid in sorted(targets):
-        if forward_to(uid, post_id):
+        res = forward_to(uid, post_id)
+        if res:
             sent += 1
             sent_uids.add(uid)
+            _record_sent(state, uid, res.get("message_id"))
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
     if sent_uids:
         # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
