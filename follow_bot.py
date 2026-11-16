@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.08"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.09"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -252,8 +252,15 @@ CANCEL_KEYBOARD = {"keyboard": [[{"text": "❌ لغو"}]], "resize_keyboard": Tr
 
 
 def _parse_keywords(text):
-    """کلمه‌های کلیدی رو از متن می‌گیره؛ با فاصله یا کاما (، ,) جدا می‌شن."""
-    return [w for w in (text or "").replace("،", " ").replace(",", " ").split() if w]
+    """کلمه‌های کلیدی رو از متن می‌گیره؛ اگه کاما (، یا ,) باشه، با کاما جدا می‌شن
+    و هر تکه می‌تونه یه عبارت چندکلمه‌ای باشه (مثلاً «شورای امنیت»)؛
+    اگه کاما نباشه، با فاصله جدا می‌شن (رفتار قبلی)."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    if "،" in t or "," in t:
+        return [w.strip() for w in t.replace(",", "،").split("،") if w.strip()]
+    return t.split()
 
 
 def remove_topic_keyboard(state=None):
@@ -378,17 +385,36 @@ def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
     return out
 
 
+_EMOJI_LEAD = re.compile(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]\s*")
+
+
 def _norm_topic(raw, custom_topics=None):
-    """«🔴 سیاسی» یا «سیاسی» یا «political» یا نام موضوع سفارشی → کلید داخلی؛ وگرنه None."""
+    """«🔴 سیاسی» یا «سیاسی» یا «political» یا نام موضوع سفارشی → کلید داخلی؛ وگرنه None.
+    ایموجی‌های اول رو یکی‌یکی برمی‌داره تا وقتی باقی‌مونده یه موضوع شناخته‌شده بشه؛
+    این‌طوری اسم‌هایی که خودشون با ایموجی شروع می‌شن (مثلاً «🚨 جنگ» یا «🔴») هم درست تشخیص داده می‌شن."""
     s = (raw or "").strip()
-    s = re.sub(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]+", "", s).strip()
-    if s in TOPIC_NAMES:
-        return TOPIC_NAMES[s]
-    if s in TOPICS:
-        return s
-    if s in (custom_topics or {}):
-        return s
-    return None
+    customs = custom_topics or {}
+
+    def resolve(x):
+        if x in TOPIC_NAMES:
+            return TOPIC_NAMES[x]
+        if x in TOPICS:
+            return x
+        if x in customs:
+            return x
+        return None
+
+    got = resolve(s)
+    if got:
+        return got
+    while True:
+        s2 = _EMOJI_LEAD.sub("", s, count=1)
+        if s2 == s:
+            return None
+        s = s2.strip()
+        got = resolve(s)
+        if got:
+            return got
 
 
 # ====== دستورهای اعضا ======
@@ -549,6 +575,8 @@ def _add_custom_topic(state, name, keywords):
     customs = state.setdefault("custom_topics", {})
     if name in TOPIC_NAMES or name in TOPICS:
         return False, f"«{name}» موضوع اصلیه و نمی‌شه دوباره اضافه‌ش کرد."
+    if not re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]", "", name):
+        return False, "نام موضوع نمی‌تونه فقط ایموجی باشه؛ یه نام با حروف بفرست."
     if name in customs:
         return False, f"موضوع «{name}» از قبل هست."
     customs[name] = {"name": name, "keywords": list(keywords)}
@@ -834,23 +862,24 @@ def handle_message(state, msg):
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
             return True
-        parts = text.split()
+        parts = text.split(None, 2)
         name_raw = parts[1] if len(parts) > 1 else ""
+        kws = _parse_keywords(parts[2]) if len(parts) > 2 else []
         key = _norm_topic(name_raw, state.get("custom_topics", {}))
         if key in TOPICS:
             # موضوع اصلی: کلمه‌ی کلیدی اضافه می‌شه؛ بدون کلمه = برگردوندن
             if key in (state.get("disabled_topics") or []):
                 ok, reply = _restore_builtin(state, key)
-                if ok and parts[2:]:
-                    _ok2, reply2 = _add_builtin_keywords(state, key, parts[2:])
+                if ok and kws:
+                    _ok2, reply2 = _add_builtin_keywords(state, key, kws)
                     reply = reply + "\n" + reply2
-            elif not parts[2:]:
+            elif not kws:
                 reply = (f"«{TOPICS[key]}» موضوع اصلیه؛ برای اضافه کردن کلمه‌ی کلیدی، "
                          f"کلمه‌ها رو هم بفرست:\n/addtopic {name_raw} <کلمه> ...")
             else:
-                ok, reply = _add_builtin_keywords(state, key, parts[2:])
+                ok, reply = _add_builtin_keywords(state, key, kws)
         else:
-            ok, reply = _add_custom_topic(state, name_raw, parts[2:])
+            ok, reply = _add_custom_topic(state, name_raw, kws)
         send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/removetopic" or text.startswith("/removetopic "):
@@ -1090,7 +1119,7 @@ def handle_message(state, msg):
                 entry["builtin_key"] = key
                 entry["ts"] = time.time()
                 pending[chat_id] = entry
-                send_message(chat_id, f"«{TOPICS[key]}» موضوع اصلیه؛ کلمه‌های کلیدی که می‌خوای بهش اضافه بشه رو بفرست:",
+                send_message(chat_id, f"«{TOPICS[key]}» موضوع اصلیه؛ کلمه‌های کلیدی که می‌خوای بهش اضافه بشه رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
                              reply_markup=CANCEL_KEYBOARD)
                 return True
             if not name or name in state.get("custom_topics", {}):
@@ -1102,7 +1131,7 @@ def handle_message(state, msg):
             entry["name"] = name
             entry["ts"] = time.time()
             pending[chat_id] = entry
-            send_message(chat_id, "کلمه‌های کلیدی رو بفرست (با فاصله یا کاما جدا کن):",
+            send_message(chat_id, "کلمه‌های کلیدی رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
                          reply_markup=CANCEL_KEYBOARD)
             return True
         if cmd == "/removetopic":
