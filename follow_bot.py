@@ -28,7 +28,7 @@ import time
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.12"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.14"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -57,6 +57,22 @@ TOPICS = {
     "sport": "⚽ ورزشی",
     "gold": "🟡 طلا و دلار",
 }
+# ایموجی ثابت هر موضوع اصلی (برای وقتی اسمش با /renametopic عوض می‌شه)
+TOPIC_EMOJI = {
+    "political": "🔴",
+    "sport": "⚽",
+    "gold": "🟡",
+}
+
+
+def _builtin_label(key, override=None):
+    """برچسب یه موضوع اصلی با اسم دلخواه؛ اگه اسم جدید با ایموجی شروع بشه،
+    همون برچسبه، وگرنه ایموجی ثابت موضوع جلوش می‌آد."""
+    if override:
+        if re.match(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]", override):
+            return override
+        return TOPIC_EMOJI[key] + " " + override
+    return TOPICS[key]
 # سنجاق فقط برای انتخاب موضوع سفارشیِ بدون ایموجی توی متن /broadcast تایپ می‌شه
 # (مثلاً «📌 سینما»)؛ توی هیچ دکمه یا لیستی نشون داده نمی‌شه.
 CUSTOM_TOPIC_EMOJI = "📌"
@@ -95,7 +111,7 @@ def _fernet():
 def load_state():
     """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
     state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
-             "custom_topics": {}, "topic_forward_counts": {}}
+             "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {}}
     if not os.path.exists(STATE_FILE):
         return state
     with open(STATE_FILE, encoding="utf-8") as f:
@@ -244,7 +260,7 @@ def _sweep_followers(state):
 # ====== کیبوردها ======
 ADMIN_BUTTONS = [
     [{"text": "👥 دنبال‌کننده‌ها"}, {"text": "📣 پیام به اعضا"}],
-    [{"text": "➕ موضوع جدید"}, {"text": "➖ حذف موضوع"}],
+    [{"text": "🔧 تغییرات موضوع"}],
     [{"text": "🔑 کلمه‌های کلیدی"}, {"text": "➖ حذف کلمه‌ی کلیدی"}],
 ]
 
@@ -268,7 +284,7 @@ def remove_topic_keyboard(state=None):
     """دکمه‌های موضوع‌های سفارشی برای حذف + موضوع‌های اصلی حذف‌شده
     برای برگردوندن (با ↩️)؛ اگه هیچ‌کدوم نیست None."""
     customs = list((state or {}).get("custom_topics", {}).values())
-    disabled = [TOPICS[k] for k in (state or {}).get("disabled_topics", []) if k in TOPICS]
+    disabled = [topic_label(state, k) for k in (state or {}).get("disabled_topics", []) if k in TOPICS]
     if not customs and not disabled:
         return None
     rows = []
@@ -277,6 +293,27 @@ def remove_topic_keyboard(state=None):
                      for c in customs[i:i + 2] if c.get("name")])
     for label in disabled:
         rows.append([{"text": "↩️ " + label}])
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _topic_changes_keyboard():
+    """کیبورد «تغییرات موضوع»: اضافه، حذف و ویرایش اسم موضوع + لغو."""
+    rows = [[{"text": "➕ موضوع جدید"}, {"text": "➖ حذف موضوع"}],
+            [{"text": "✏️ ویرایش اسم موضوع"}],
+            [{"text": "❌ لغو"}]]
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def rename_topic_keyboard(state=None):
+    """دکمه‌های همه‌ی موضوع‌ها (اصلی فعال + سفارشی) برای ویرایش اسم؛
+    اگه هیچ‌کدوم نیست None."""
+    labels = [topic_label(state, k) for k in active_topics(state)]
+    labels += [c.get("name", "")
+               for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
+    if not labels:
+        return None
+    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
     rows.append([{"text": "❌ لغو"}])
     return {"keyboard": rows, "resize_keyboard": True}
 
@@ -296,7 +333,7 @@ def main_keyboard(chat_id=None, state=None):
         rows = [list(r) for r in ADMIN_BUTTONS]
         rows.append([{"text": "❓ راهنما"}])
         return {"keyboard": rows, "resize_keyboard": True}
-    labels = [TOPICS[k] for k in active_topics(state)]
+    labels = [topic_label(state, k) for k in active_topics(state)]
     labels += [c.get("name", "")
                for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
     rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
@@ -311,7 +348,7 @@ def main_keyboard(chat_id=None, state=None):
 
 def topic_keyboard(state=None):
     act = active_topics(state)
-    rows = [[{"text": TOPICS[k]} for k in act[i:i + 2]]
+    rows = [[{"text": topic_label(state, k)} for k in act[i:i + 2]]
             for i in range(0, len(act), 2)]
     customs = list((state or {}).get("custom_topics", {}).values())
     for i in range(0, len(customs), 2):
@@ -331,9 +368,10 @@ def unfollow_keyboard(followed, state=None):
 
 def topic_label(state, key):
     """برچسب فارسی یه موضوع (اصلی یا سفارشی)؛ اگه ناشناخته بود خود کلید.
-    موضوع سفارشی با همون نام خودش نشون داده می‌شه، بدون هیچ ایموجی اضافه."""
+    موضوع سفارشی با همون نام خودش نشون داده می‌شه، بدون هیچ ایموجی اضافه.
+    اسم موضوع اصلی رو می‌شه با /renametopic عوض کرد (state["topic_labels"])."""
     if key in TOPICS:
-        return TOPICS[key]
+        return _builtin_label(key, (state or {}).get("topic_labels", {}).get(key))
     ct = (state or {}).get("custom_topics", {}).get(key)
     if ct:
         return ct.get("name") or key
@@ -392,12 +430,15 @@ def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
 _EMOJI_LEAD = re.compile(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]\s*")
 
 
-def _norm_topic(raw, custom_topics=None):
+def _norm_topic(raw, custom_topics=None, topic_labels=None):
     """«🔴 سیاسی» یا «سیاسی» یا «political» یا نام موضوع سفارشی → کلید داخلی؛ وگرنه None.
+    اسم جدید موضوع اصلی (بعد از /renametopic) هم از topic_labels تشخیص داده می‌شه؛
+    اسم قدیمی موضوع اصلی همچنان به‌عنوان نام مستعار کار می‌کنه.
     ایموجی‌های اول رو یکی‌یکی برمی‌داره تا وقتی باقی‌مونده یه موضوع شناخته‌شده بشه؛
     این‌طوری اسم‌هایی که خودشون با ایموجی شروع می‌شن (مثلاً «🚨 جنگ» یا «🔴») هم درست تشخیص داده می‌شن."""
     s = (raw or "").strip()
     customs = custom_topics or {}
+    labels = topic_labels or {}
 
     def resolve(x):
         if x in TOPIC_NAMES:
@@ -406,6 +447,9 @@ def _norm_topic(raw, custom_topics=None):
             return x
         if x in customs:
             return x
+        for k, name in labels.items():
+            if x == name:
+                return k
         return None
 
     got = resolve(s)
@@ -424,7 +468,7 @@ def _norm_topic(raw, custom_topics=None):
 # ====== دستورهای اعضا ======
 def _welcome_topics_lines(state=None):
     """خط‌های موضوع‌های فعال برای متن خوش‌آمد (اصلی + سفارشی، بدون ایموجی اضافه)."""
-    lines = [TOPICS[k] for k in active_topics(state)]
+    lines = [topic_label(state, k) for k in active_topics(state)]
     lines += [c.get("name", "")
               for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
     return lines
@@ -442,7 +486,8 @@ WELCOME_OUTRO = ("\n\nبرای دنبال کردن، روی یه موضوع بز
 
 ADMIN_WELCOME_TEXT = (
     "سلام! 👋 این ربات خبررسان GodNews24 رو مدیریت می‌کنی.\n\n"
-    "از دکمه‌های پایین می‌تونی موضوع جدید اضافه کنی، "
+    "از دکمه‌های پایین می‌تونی موضوع‌ها رو تغییر بدی "
+    "(موضوع جدید، حذف موضوع، ویرایش اسم موضوع)، "
     "دنبال‌کننده‌ها و آمار رو ببینی و به اعضا پیام بدی."
 )
 
@@ -462,8 +507,10 @@ HELP_TEXT = (
 ADMIN_HELP_TEXT = (
     "راهنمای مدیریت ربات خبررسان GodNews24:\n\n"
     "/followers — آمار و لیست دنبال‌کننده‌ها؛ برای هر موضوع چند نفر دنبال می‌کنن و چندتا خبر براشون ارسال شده\n"
+    "/managetopics — تغییرات موضوع: اضافه کردن موضوع جدید، حذف موضوع و ویرایش اسم موضوع (دکمه‌ی «🔧 تغییرات موضوع»)\n"
     "/addtopic — اضافه کردن موضوع جدید: /addtopic <نام> <کلمه‌ی کلیدی> ...؛ اگه موضوع از قبل باشه، کلمه‌ها بهش اضافه می‌شن\n"
     "/removetopic — حذف یه موضوع سفارشی: /removetopic <نام>\n"
+    "/renametopic — ویرایش اسم یه موضوع (اصلی یا سفارشی): /renametopic (انتخاب از لیست) یا /renametopic <نام>\n"
     "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)؛ از همون‌جا با دکمه‌ها می‌تونی کلمه اضافه یا حذف کنی\n"
     "/addkeyword — اضافه کردن کلمه‌ی کلیدی به یه موضوع: /addkeyword (یا /addkeyword <نام موضوع> <کلمه> ...)\n"
     "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
@@ -496,14 +543,23 @@ COMMAND_HELP = {
     "/followers": ("آمار و لیست دنبال‌کننده‌ها:\n\n"
                    "برای هر موضوع نشون می‌ده چند نفر دنبالش می‌کنن و تا حالا چندتا خبر براشون ارسال شده.\n"
                    "بنویس /followers یا دکمه‌ی «👥 دنبال‌کننده‌ها» رو بزن."),
+    "/managetopics": ("تغییرات موضوع:\n\n"
+                      "اضافه کردن موضوع جدید، حذف موضوع و ویرایش اسم موضوع، همه از یه جا.\n\n"
+                      "• دکمه‌ی «🔧 تغییرات موضوع» رو بزن و یکی رو انتخاب کن\n"
+                      "• یا مستقیم بنویس: /managetopics"),
     "/addtopic": ("اضافه کردن موضوع جدید:\n\n"
-                  "• با دکمه‌ی «➕ موضوع جدید»: اول نام موضوع رو بفرست، بعد کلمه‌های کلیدی رو\n"
+                  "• از «🔧 تغییرات موضوع» بعد «➕ موضوع جدید»: اول نام موضوع رو بفرست، بعد کلمه‌های کلیدی رو\n"
                   "• مستقیم: /addtopic <نام> <کلمه‌ی کلیدی> ...\n"
                   "• اگه موضوع از قبل باشه، کلمه‌ها بهش اضافه می‌شن؛ برای موضوع اصلی هم با همین دستور کلمه اضافه می‌شه."),
     "/removetopic": ("حذف یه موضوع سفارشی:\n\n"
-                     "• با دکمه‌ی «➖ حذف موضوع» و انتخاب از لیست\n"
+                     "• از «🔧 تغییرات موضوع» بعد «➖ حذف موضوع» و انتخاب از لیست\n"
                      "• مستقیم: /removetopic <نام>\n"
                      "موضوع اصلی حذف‌شده رو می‌تونی از همون لیست برگردونی."),
+    "/renametopic": ("ویرایش اسم یه موضوع (اصلی یا سفارشی):\n\n"
+                     "• از «🔧 تغییرات موضوع» بعد «✏️ ویرایش اسم موضوع» و انتخاب از لیست، بعد اسم جدید رو بفرست\n"
+                     "• مستقیم: /renametopic (انتخاب از لیست) یا /renametopic <نام>\n"
+                     "اسم موضوع اصلی عوض می‌شه ولی کلید، کلمه‌های کلیدی و تشخیص خبرهاش همون می‌مونه؛ "
+                     "برای موضوع سفارشی، دنبال‌کننده‌ها و آمار ارسالش هم با اسم جدید می‌مونه."),
     "/keywords": ("لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>).\n\n"
                   "از همون‌جا با دکمه‌های «➕ اضافه کردن کلمه‌ی کلیدی» و «➖ حذف کلمه‌ی کلیدی» می‌تونی کلمه اضافه یا حذف کنی."),
     "/addkeyword": ("اضافه کردن کلمه‌ی کلیدی به یه موضوع:\n\n"
@@ -572,7 +628,7 @@ def _sender_display(msg):
 def _broadcast_target_keyboard(state=None):
     """کیبورد انتخاب گیرنده‌ی پیام به اعضا: «به همه» + هر موضوع فعال؛
     ادمین اول گیرنده رو انتخاب می‌کنه، بعد متن پیام رو می‌فرسته."""
-    labels = [TOPICS[k] for k in active_topics(state)]
+    labels = [topic_label(state, k) for k in active_topics(state)]
     labels += [c.get("name", "")
                for c in (state or {}).get("custom_topics", {}).values() if c.get("name")]
     rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
@@ -581,15 +637,16 @@ def _broadcast_target_keyboard(state=None):
     return {"keyboard": rows, "resize_keyboard": True}
 
 
-def _broadcast_target(arg, custom_topics=None):
+def _broadcast_target(arg, custom_topics=None, topic_labels=None):
     """اگه متن با «ایموجی + نام موضوع» شروع بشه، (کلید موضوع، بقیه‌ی متن) رو
     برمی‌گردونه؛ وگرنه (None, کل متن) — یعنی پیام همگانی. اسم خالی موضوع
     به‌تنهایی انتخاب‌کننده نیست، پس پیامتی که با «سیاسی ...» شروع بشه به همه
     می‌رسه، نه فقط به سیاسی‌ها. فاصله‌ی بین ایموجی و نام مهم نیست.
     موضوع سفارشی با ایموجی اولِ اسم خودش (مثلاً «🚨 جنگ») یا با 📌 انتخاب می‌شه؛
-    موضوع سفارشی بدون ایموجی فقط با 📌 (مثلاً «📌 سینما»)."""
+    موضوع سفارشی بدون ایموجی فقط با 📌 (مثلاً «📌 سینما»).
+    اسم جدید موضوع اصلی (بعد از /renametopic) هم با همون ایموجی + نام جدید انتخاب می‌شه."""
     s = (arg or "").strip()
-    labels = [(k, v) for k, v in TOPICS.items()]
+    labels = [(k, _builtin_label(k, (topic_labels or {}).get(k))) for k in TOPICS]
     for k, ct in (custom_topics or {}).items():
         name = ct.get("name") or k
         if _EMOJI_LEAD.match(name):
@@ -701,7 +758,7 @@ def _keywords_text(state, key=None):
     keys = [key] if key else active_topics(state) + list(state.get("custom_topics", {}))
     lines = ["🔑 کلمه‌های کلیدی موضوع‌ها:", ""]
     for k in keys:
-        label = TOPICS.get(k) or (state.get("custom_topics", {}).get(k, {}).get("name", k))
+        label = topic_label(state, k)
         kws = _topic_keywords(state, k)
         lines.append(f"{label}:")
         lines.append("، ".join(kws) if kws else "—")
@@ -722,7 +779,7 @@ def _remove_keyword(state, key, kw):
     """یه کلمه‌ی کلیدی رو از یه موضوع حذف می‌کنه؛ برمی‌گردونه (موفق؟، پیام).
     کلمه‌ی داخلی موضوع اصلی به لیست حذف‌شده‌ها می‌ره (با /addtopic برمی‌گرده)؛
     آخرین کلمه‌ی موضوع سفارشی قابل حذف نیست."""
-    label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+    label = topic_label(state, key)
     if key in TOPICS:
         extras = (state.get("topic_extra_keywords") or {}).get(key, [])
         if kw in extras:
@@ -753,7 +810,7 @@ def _add_builtin_keywords(state, key, keywords):
     if key not in TOPICS:
         return False, "چنین موضوعی نداریم."
     if key in (state.get("disabled_topics") or []):
-        return False, f"موضوع «{TOPICS[key]}» حذف شده؛ اول برگردونش، بعد کلمه اضافه کن."
+        return False, f"موضوع «{topic_label(state, key)}» حذف شده؛ اول برگردونش، بعد کلمه اضافه کن."
     hardcoded = _builtin_hardcoded(key)
     extras = state.setdefault("topic_extra_keywords", {}).setdefault(key, [])
     removed = (state.get("topic_removed_keywords") or {}).get(key, [])
@@ -766,7 +823,7 @@ def _add_builtin_keywords(state, key, keywords):
     extras.extend(new)
     parts = []
     if new:
-        parts.append(f"به موضوع «{TOPICS[key]}» این کلمه‌ها اضافه شد: {', '.join(new)} ✅")
+        parts.append(f"به موضوع «{topic_label(state, key)}» این کلمه‌ها اضافه شد: {', '.join(new)} ✅")
     if restored:
         parts.append(f"این کلمه‌ها برگشتن: {', '.join(restored)} ✅")
     return True, "\n".join(parts)
@@ -806,14 +863,14 @@ def _disable_builtin(state, key):
         return False, "چنین موضوعی نداریم."
     disabled = state.setdefault("disabled_topics", [])
     if key in disabled:
-        return False, f"موضوع «{TOPICS[key]}» قبلاً حذف شده."
+        return False, f"موضوع «{topic_label(state, key)}» قبلاً حذف شده."
     disabled.append(key)
     affected = 0
     for u in state.get("users", {}).values():
         if key in u.get("topics", []):
             u["topics"].remove(key)
             affected += 1
-    return True, f"موضوع «{TOPICS[key]}» حذف شد؛ دنبال کردن برای {affected} نفر لغو شد."
+    return True, f"موضوع «{topic_label(state, key)}» حذف شد؛ دنبال کردن برای {affected} نفر لغو شد."
 
 
 def _restore_builtin(state, key):
@@ -822,9 +879,9 @@ def _restore_builtin(state, key):
         return False, "چنین موضوعی نداریم."
     disabled = state.setdefault("disabled_topics", [])
     if key not in disabled:
-        return False, f"موضوع «{TOPICS[key]}» حذف نشده بود."
+        return False, f"موضوع «{topic_label(state, key)}» حذف نشده بود."
     disabled.remove(key)
-    return True, f"موضوع «{TOPICS[key]}» برگشت ✅"
+    return True, f"موضوع «{topic_label(state, key)}» برگشت ✅"
 
 
 def _remove_custom_topic(state, name):
@@ -842,6 +899,101 @@ def _remove_custom_topic(state, name):
         if name in u.get("topics", []):
             u["topics"].remove(name)
     return True, f"موضوع «{name}» حذف شد."
+
+
+def _rename_custom_topic(state, old, new):
+    """اسم یه موضوع سفارشی رو عوض می‌کنه؛ دنبال‌کننده‌ها و آمار ارسال هم
+    با اسم جدید می‌مونن (جای موضوع توی لیست‌ها عوض نمی‌شه)؛
+    برمی‌گردونه (موفق؟، پیام)."""
+    customs = state.get("custom_topics", {})
+    if not old or old not in customs:
+        return False, "چنین موضوعی نداریم."
+    new = (new or "").strip()
+    if not new:
+        return False, "اسم جدید رو بفرست."
+    if new == old:
+        return False, "اسم جدید با قبلی یکیه."
+    if new in _reserved_topic_names(state, except_key=old):
+        return False, f"موضوع «{new}» از قبل هست."
+    if not re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]", "", new):
+        return False, "نام موضوع نمی‌تونه فقط ایموجی باشه؛ یه نام با حروف بفرست."
+    rebuilt = {}
+    for k, v in customs.items():
+        if k == old:
+            entry = dict(v)
+            entry["name"] = new
+            rebuilt[new] = entry
+        else:
+            rebuilt[k] = v
+    state["custom_topics"] = rebuilt
+    for u in state.get("users", {}).values():
+        ts = u.get("topics", [])
+        if old in ts:
+            u["topics"] = [new if t == old else t for t in ts]
+    counts = state.get("topic_forward_counts", {})
+    if old in counts:
+        counts[new] = counts.pop(old)
+    return True, (f"اسم موضوع «{old}» به «{new}» عوض شد ✅\n"
+                  "دنبال‌کننده‌ها و آمار ارسالش سر جاشون مونده.")
+
+
+def _builtin_name_part(state, key):
+    """نام فعلی یه موضوع اصلی بدون ایموجی (برای مقایسه‌ی اسم جدید)."""
+    override = (state or {}).get("topic_labels", {}).get(key)
+    if override:
+        return _EMOJI_LEAD.sub("", override, count=1).strip() or override
+    parts = TOPICS[key].split(None, 1)
+    return parts[1] if len(parts) > 1 else TOPICS[key]
+
+
+def _reserved_topic_names(state, except_key=None):
+    """همه‌ی اسم‌ها و برچسب‌های فعلی موضوع‌ها (به‌جز موضوعی که داره ویرایش می‌شه)؛
+    برای اینکه اسم جدید با هیچ موضوع دیگه‌ای قاطی نشه. اسم قدیمی خود همون
+    موضوع مستثناست تا بشه اسمش رو به حالت اول برگردوند."""
+    names = set()
+    for nm, k in TOPIC_NAMES.items():
+        if k != except_key:
+            names.add(nm)
+    for k in TOPICS:
+        if k != except_key:
+            names.add(k)
+            names.add(topic_label(state, k))
+            names.add(_builtin_name_part(state, k))
+    for k, ct in (state or {}).get("custom_topics", {}).items():
+        if k == except_key:
+            continue
+        names.add(k)
+        if ct.get("name"):
+            names.add(ct["name"])
+    return names
+
+
+def _rename_builtin_topic(state, key, new):
+    """اسم یه موضوع اصلی رو عوض می‌کنه (فقط برچسب؛ کلید، کلمه‌ها و تشخیص
+    خبرهاش عوض نمی‌شن)؛ برمی‌گردونه (موفق؟، پیام)."""
+    if key not in TOPICS:
+        return False, "چنین موضوعی نداریم."
+    new = (new or "").strip()
+    if not new:
+        return False, "اسم جدید رو بفرست."
+    cur_label = topic_label(state, key)
+    cur_name = _builtin_name_part(state, key)
+    if new == cur_label or new == cur_name:
+        return False, "اسم جدید با قبلی یکیه."
+    if not re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F\s]", "", new):
+        return False, "نام موضوع نمی‌تونه فقط ایموجی باشه؛ یه نام با حروف بفرست."
+    reserved = _reserved_topic_names(state, except_key=key)
+    if new in reserved or _builtin_label(key, new) in reserved:
+        return False, f"موضوع «{new}» از قبل هست."
+    state.setdefault("topic_labels", {})[key] = new
+    return True, f"اسم موضوع «{cur_label}» به «{_builtin_label(key, new)}» عوض شد ✅"
+
+
+def _rename_topic(state, key, new):
+    """اسم یه موضوع (اصلی یا سفارشی) رو عوض می‌کنه؛ برمی‌گردونه (موفق؟، پیام)."""
+    if key in TOPICS:
+        return _rename_builtin_topic(state, key, new)
+    return _rename_custom_topic(state, key, new)
 
 
 def _send_followers(state, chat_id):
@@ -959,6 +1111,14 @@ def handle_message(state, msg):
         send_message(chat_id, "پیام به کی برسه؟",
                      reply_markup=_broadcast_target_keyboard(state))
         return True
+    if text == "🔧 تغییرات موضوع" or text == "/managetopics":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        pending[chat_id] = {"cmd": "/managetopics", "ts": time.time()}
+        send_message(chat_id, "چی رو می‌خوای تغییر بدی؟",
+                     reply_markup=_topic_changes_keyboard())
+        return True
     if text == "➕ موضوع جدید":
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -980,6 +1140,48 @@ def handle_message(state, msg):
         send_message(chat_id, "کدوم موضوع رو حذف کنم؟\n(موضوع حذف‌شده رو بزن تا برگرده)",
                      reply_markup=kb)
         return True
+    if text == "✏️ ویرایش اسم موضوع":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        kb = rename_topic_keyboard(state)
+        if kb is None:
+            send_message(chat_id, "هنوز موضوعی نداری که اسمش رو عوض کنی 🙂",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        pending[chat_id] = {"cmd": "/renametopic", "step": "pick", "ts": time.time()}
+        send_message(chat_id, "اسم کدوم موضوع رو عوض کنم؟",
+                     reply_markup=kb)
+        return True
+    if text == "/renametopic" or text.startswith("/renametopic "):
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        parts = text.split(None, 1)
+        if len(parts) == 1:
+            kb = rename_topic_keyboard(state)
+            if kb is None:
+                send_message(chat_id, "هنوز موضوعی نداری که اسمش رو عوض کنی 🙂",
+                             reply_markup=main_keyboard(chat_id, state))
+                return True
+            pending[chat_id] = {"cmd": "/renametopic", "step": "pick", "ts": time.time()}
+            send_message(chat_id, "اسم کدوم موضوع رو عوض کنم؟",
+                         reply_markup=kb)
+            return True
+        key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}), state.get("topic_labels", {}))
+        if not key or (key not in TOPICS and key not in state.get("custom_topics", {})):
+            send_message(chat_id, "چنین موضوعی نداریم.",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        if key in (state.get("disabled_topics") or []):
+            send_message(chat_id, "این موضوع حذف شده.",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        pending[chat_id] = {"cmd": "/renametopic", "step": "newname", "topic": key,
+                            "ts": time.time()}
+        send_message(chat_id, f"اسم جدید «{topic_label(state, key)}» چیه؟",
+                     reply_markup=CANCEL_KEYBOARD)
+        return True
     if text == "/addtopic" or text.startswith("/addtopic "):
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -987,7 +1189,7 @@ def handle_message(state, msg):
         parts = text.split(None, 2)
         name_raw = parts[1] if len(parts) > 1 else ""
         kws = _parse_keywords(parts[2]) if len(parts) > 2 else []
-        key = _norm_topic(name_raw, state.get("custom_topics", {}))
+        key = _norm_topic(name_raw, state.get("custom_topics", {}), state.get("topic_labels", {}))
         if key in TOPICS:
             # موضوع اصلی: کلمه‌ی کلیدی اضافه می‌شه؛ بدون کلمه = برگردوندن
             if key in (state.get("disabled_topics") or []):
@@ -996,12 +1198,12 @@ def handle_message(state, msg):
                     _ok2, reply2 = _add_builtin_keywords(state, key, kws)
                     reply = reply + "\n" + reply2
             elif not kws:
-                reply = (f"«{TOPICS[key]}» موضوع اصلیه؛ برای اضافه کردن کلمه‌ی کلیدی، "
+                reply = (f"«{topic_label(state, key)}» موضوع اصلیه؛ برای اضافه کردن کلمه‌ی کلیدی، "
                          f"کلمه‌ها رو هم بفرست:\n/addtopic {name_raw} <کلمه> ...")
             else:
                 ok, reply = _add_builtin_keywords(state, key, kws)
         else:
-            existing = _norm_topic(name_raw, state.get("custom_topics", {}))
+            existing = _norm_topic(name_raw, state.get("custom_topics", {}), state.get("topic_labels", {}))
             if existing in (state.get("custom_topics", {}) or {}):
                 if kws:
                     ok, reply = _add_custom_keywords(state, existing, kws)
@@ -1019,7 +1221,7 @@ def handle_message(state, msg):
             return True
         parts = text.split(None, 1)
         name_raw = parts[1].strip() if len(parts) > 1 else ""
-        key = _norm_topic(name_raw, state.get("custom_topics", {}))
+        key = _norm_topic(name_raw, state.get("custom_topics", {}), state.get("topic_labels", {}))
         if key in TOPICS:
             ok, reply = _disable_builtin(state, key)
         else:
@@ -1033,7 +1235,7 @@ def handle_message(state, msg):
         parts = text.split(None, 1)
         key = None
         if text.startswith("/keywords "):
-            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}))
+            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}), state.get("topic_labels", {}))
             if not key or (key in TOPICS and key in (state.get("disabled_topics") or [])):
                 send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
                 return True
@@ -1046,12 +1248,12 @@ def handle_message(state, msg):
         parts = text.split(None, 1)
         key = None
         if text.startswith("/removekeyword "):
-            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}))
+            key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}), state.get("topic_labels", {}))
             if not key or key not in active_topics(state) + list(state.get("custom_topics", {})):
                 send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
                 return True
         if key:
-            label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+            label = topic_label(state, key)
             pending[chat_id] = {"cmd": "/removekeyword", "step": "keyword", "topic": key,
                                 "ts": time.time()}
             send_message(chat_id, f"کدوم کلمه‌ی «{label}» رو حذف کنم؟",
@@ -1071,13 +1273,13 @@ def handle_message(state, msg):
                          reply_markup=topic_keyboard(state))
             return True
         parts = text.split(None, 2)
-        key = _norm_topic(parts[1].strip(), state.get("custom_topics", {})) if len(parts) > 1 else None
+        key = _norm_topic(parts[1].strip(), state.get("custom_topics", {}), state.get("topic_labels", {})) if len(parts) > 1 else None
         if not key or key not in active_topics(state) + list(state.get("custom_topics", {})):
             send_message(chat_id, "چنین موضوعی نداریم.", reply_markup=main_keyboard(chat_id, state))
             return True
         kws = _parse_keywords(parts[2]) if len(parts) > 2 else []
         if not kws:
-            label = TOPICS.get(key) or (state.get("custom_topics", {}).get(key, {}).get("name", key))
+            label = topic_label(state, key)
             pending[chat_id] = {"cmd": "/addkeyword", "step": "keywords", "topic": key,
                                 "ts": time.time()}
             send_message(chat_id, f"کلمه‌های کلیدی جدید برای «{label}» رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
@@ -1099,7 +1301,7 @@ def handle_message(state, msg):
                          reply_markup=_broadcast_target_keyboard(state))
             return True
         arg = text.split(None, 1)[1].strip()
-        topic, msg = _broadcast_target(arg, state.get("custom_topics", {}))
+        topic, msg = _broadcast_target(arg, state.get("custom_topics", {}), state.get("topic_labels", {}))
         if topic and not msg:
             send_message(chat_id, "متن پیام رو هم بنویس:\n/broadcast <ایموجی موضوع> <متن>",
                          reply_markup=main_keyboard(chat_id, state))
@@ -1127,9 +1329,10 @@ def handle_message(state, msg):
         send_message(chat_id, "کدوم موضوع رو می‌خوای دنبال کنی؟", reply_markup=topic_keyboard(state))
         return True
     if text.startswith("/follow "):
-        topic = _norm_topic(text.split(None, 1)[1], state.get("custom_topics", {}))
+        topic = _norm_topic(text.split(None, 1)[1], state.get("custom_topics", {}), state.get("topic_labels", {}))
         if not topic:
-            send_message(chat_id, "این موضوع رو نمی‌شناسم. موضوع‌ها: سیاسی، ورزشی، طلا و دلار",
+            topics_list = "، ".join(topic_label(state, k) for k in active_topics(state))
+            send_message(chat_id, f"این موضوع رو نمی‌شناسم. موضوع‌ها: {topics_list}",
                          reply_markup=main_keyboard(chat_id, state))
             return True
         if topic in (state.get("disabled_topics") or []):
@@ -1158,7 +1361,7 @@ def handle_message(state, msg):
             state.get("users", {}).get(chat_id, {})["topics"] = []
             send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id, state))
             return True
-        topic = _norm_topic(arg, state.get("custom_topics", {}))
+        topic = _norm_topic(arg, state.get("custom_topics", {}), state.get("topic_labels", {}))
         if not topic:
             send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id, state))
             return True
@@ -1173,13 +1376,13 @@ def handle_message(state, msg):
         pending.pop(chat_id, None)
         if cmd == "/removekeyword":
             if entry.get("step") == "topic":
-                topic = _norm_topic(text, state.get("custom_topics", {}))
+                topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
                 if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
                     send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
                                  reply_markup=topic_keyboard(state))
                     pending[chat_id] = entry
                     return True
-                label = TOPICS.get(topic) or (state.get("custom_topics", {}).get(topic, {}).get("name", topic))
+                label = topic_label(state, topic)
                 entry["step"] = "keyword"
                 entry["topic"] = topic
                 entry["ts"] = time.time()
@@ -1199,13 +1402,13 @@ def handle_message(state, msg):
             return True
         if cmd == "/addkeyword":
             if entry.get("step") == "topic":
-                topic = _norm_topic(text, state.get("custom_topics", {}))
+                topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
                 if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
                     send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
                                  reply_markup=topic_keyboard(state))
                     pending[chat_id] = entry
                     return True
-                label = TOPICS.get(topic) or (state.get("custom_topics", {}).get(topic, {}).get("name", topic))
+                label = topic_label(state, topic)
                 entry["step"] = "keywords"
                 entry["topic"] = topic
                 entry["ts"] = time.time()
@@ -1228,9 +1431,10 @@ def handle_message(state, msg):
             send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
             return True
         if cmd == "/follow":
-            topic = _norm_topic(text, state.get("custom_topics", {}))
+            topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
             if not topic:
-                send_message(chat_id, "این موضوع رو نمی‌شناسم. موضوع‌ها: سیاسی، ورزشی، طلا و دلار",
+                topics_list = "، ".join(topic_label(state, k) for k in active_topics(state))
+                send_message(chat_id, f"این موضوع رو نمی‌شناسم. موضوع‌ها: {topics_list}",
                              reply_markup=main_keyboard(chat_id, state))
                 return True
             if topic in (state.get("disabled_topics") or []):
@@ -1249,7 +1453,7 @@ def handle_message(state, msg):
                 state.get("users", {}).get(chat_id, {})["topics"] = []
                 send_message(chat_id, "دنبال کردن همه‌ی موضوع‌ها لغو شد.", reply_markup=main_keyboard(chat_id, state))
                 return True
-            topic = _norm_topic(text, state.get("custom_topics", {}))
+            topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
             if not topic:
                 send_message(chat_id, "این موضوع رو نمی‌شناسم.", reply_markup=main_keyboard(chat_id, state))
                 return True
@@ -1273,7 +1477,7 @@ def handle_message(state, msg):
                     send_message(chat_id, "متن پیام رو بفرست (به همه‌ی اعضا):",
                                  reply_markup=CANCEL_KEYBOARD)
                     return True
-                topic = _norm_topic(text, state.get("custom_topics", {}))
+                topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
                 if not topic or topic not in active_topics(state) + list(state.get("custom_topics", {})):
                     send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
                                  reply_markup=_broadcast_target_keyboard(state))
@@ -1328,7 +1532,7 @@ def handle_message(state, msg):
                 return True
             # قدم اول جادوگر: کل پیام، نام موضوعه (حتی چندکلمه‌ای و حتی با ایموجی اولش)
             name = text.strip()
-            key = _norm_topic(name, state.get("custom_topics", {}))
+            key = _norm_topic(name, state.get("custom_topics", {}), state.get("topic_labels", {}))
             if key in TOPICS:
                 if key in (state.get("disabled_topics") or []):
                     ok, reply = _restore_builtin(state, key)
@@ -1338,7 +1542,7 @@ def handle_message(state, msg):
                 entry["builtin_key"] = key
                 entry["ts"] = time.time()
                 pending[chat_id] = entry
-                send_message(chat_id, f"«{TOPICS[key]}» موضوع اصلیه؛ کلمه‌های کلیدی که می‌خوای بهش اضافه بشه رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
+                send_message(chat_id, f"«{topic_label(state, key)}» موضوع اصلیه؛ کلمه‌های کلیدی که می‌خوای بهش اضافه بشه رو بفرست (با کاما جدا کن؛ هر کدوم می‌تونه چند کلمه باشه):",
                              reply_markup=CANCEL_KEYBOARD)
                 return True
             if not name or name in state.get("custom_topics", {}):
@@ -1355,7 +1559,7 @@ def handle_message(state, msg):
             return True
         if cmd == "/removetopic":
             if entry.get("step") == "pick":
-                topic = _norm_topic(text, state.get("custom_topics", {}))
+                topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
                 if topic in (state.get("disabled_topics") or []):
                     ok, reply = _restore_builtin(state, topic)
                 elif topic in TOPICS:
@@ -1373,8 +1577,50 @@ def handle_message(state, msg):
             ok, reply = _remove_custom_topic(state, text.strip())
             send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
             return True
+        if cmd == "/renametopic":
+            if entry.get("step") == "pick":
+                topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
+                if not topic or (topic not in TOPICS and topic not in state.get("custom_topics", {})):
+                    kb = rename_topic_keyboard(state) or main_keyboard(chat_id, state)
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=kb)
+                    pending[chat_id] = entry
+                    return True
+                if topic in (state.get("disabled_topics") or []):
+                    kb = rename_topic_keyboard(state) or main_keyboard(chat_id, state)
+                    send_message(chat_id, "این موضوع حذف شده؛ یه موضوع دیگه رو انتخاب کن:",
+                                 reply_markup=kb)
+                    pending[chat_id] = entry
+                    return True
+                entry["step"] = "newname"
+                entry["topic"] = topic
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"اسم جدید «{topic_label(state, topic)}» چیه؟",
+                             reply_markup=CANCEL_KEYBOARD)
+                return True
+            # قدم اسم جدید
+            old = entry.get("topic")
+            if not old or (old not in TOPICS and old not in state.get("custom_topics", {})):
+                send_message(chat_id, "اون موضوع دیگه نیست.",
+                             reply_markup=main_keyboard(chat_id, state))
+                return True
+            new = text.strip()
+            if not new:
+                send_message(chat_id, "اسم جدید رو بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                pending[chat_id] = entry
+                return True
+            ok, reply = _rename_topic(state, old, new)
+            if not ok:
+                send_message(chat_id, reply + "\nیه اسم دیگه بفرست:",
+                             reply_markup=CANCEL_KEYBOARD)
+                pending[chat_id] = entry
+                return True
+            send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+            return True
     # زدن دکمه‌ی موضوع روی کیبورد اصلی = دنبال کردن همون موضوع
-    topic = _norm_topic(text, state.get("custom_topics", {}))
+    topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
     if topic:
         if topic in (state.get("disabled_topics") or []):
             send_message(chat_id, "این موضوع حذف شده.",
