@@ -138,7 +138,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.22")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.23")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2124,6 +2124,26 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("/rules", self.last_text())
         self.send(USER_A, "/help /rules")
         self.assertNotIn("تنظیمات", self.last_text())
+
+    # ---- 0.23: no mid-run git commits (the run #40 killer) ----
+    def test_main_commits_only_at_end(self):
+        # با کد قدیمی وسط حلقه هم کامیت می‌شد (last_commit=0 → فوری) پس ۲ بار
+        # صدا زده می‌شد؛ حالا فقط کامیت پایانی (۱ بار) باید باشد.
+        calls = {"run_once": 0, "commit": 0}
+        orig_run_once = fb.run_once
+        orig_commit = fb.commit_state
+        orig_token, orig_loop = fb.TOKEN, fb.LOOP_MINUTES
+        fb.run_once = lambda: calls.__setitem__("run_once", calls["run_once"] + 1)
+        fb.commit_state = lambda: calls.__setitem__("commit", calls["commit"] + 1)
+        fb.TOKEN, fb.LOOP_MINUTES = "x", 0
+        try:
+            fb.main()
+        finally:
+            fb.run_once = orig_run_once
+            fb.commit_state = orig_commit
+            fb.TOKEN, fb.LOOP_MINUTES = orig_token, orig_loop
+        self.assertEqual(calls["run_once"], 1)
+        self.assertEqual(calls["commit"], 1)
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""

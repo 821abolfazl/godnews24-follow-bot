@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.22"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.23"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -39,7 +39,6 @@ LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES") or 0)
 STATE_FILE = "followers.json"
 POLL_SECONDS = 2             # فاصله‌ی کوتاه بین دو دور؛ انتظار واقعی رو long polling انجام می‌ده
 PENDING_TIMEOUT = 600        # ثانیه؛ اگه عضو تا این مدت جواب نده، انتظار لغو می‌شه
-COMMIT_EVERY_SEC = 300       # حافظه حداکثر هر ۵ دقیقه توی گیت‌هاب کامیت می‌شه
 MEMBER_CACHE_TTL = 600       # ثانیه؛ نتیجه‌ی عضویت کانال ۱۰ دقیقه کش می‌شه
 SWEEP_INTERVAL_SEC = 24 * 3600  # هر چند وقت یک بار عضویت دنبال‌کننده‌ها چک بشه (روزی یک بار)
 SWEEP_WARN_TEXT = (
@@ -2092,9 +2091,13 @@ def run_once():
 # ====== گیت‌هاب: کامیت حافظه + صدا زدن اجرای بعدی ======
 def commit_state():
     """حافظه‌ی رمزنگاری‌شده رو توی گیت‌هاب کامیت می‌کنه (فقط وقتی توی Actions هستیم).
-    اگه pull با تداخل مواجه بشه، یا فایل نشونه‌های تداخل داشته باشه، یا رمزگشایی
-    نشه، این دور کامیت نمی‌شه — فایل خراب هیچ‌وقت کامیت نمی‌شه؛ همون خطایی که
-    ربات رو از کار می‌نداخت (فایل درگیرِ تداخل رمزگشایی نمی‌شه)."""
+    فقط یک بار در پایان اجرا صدا زده می‌شه (نسخه‌ی ۰.۲۳) — کامیت وسط حلقه حذف شد:
+    pull وسط حلقه با پوشِ اجرای هم‌زمان مسابقه می‌داد و فایل محیط کار رو درگیر
+    تداخل می‌کرد؛ load_state دور بعد همون فایل رو می‌خوند، رمزگشایی نمی‌شد و ربات
+    می‌مرد (ران ۴۰). حالا وسط حلقه فقط save_state محلی می‌نویسه و پوش فقط پایان
+    اجراست (به‌علاوه‌ی مرحله‌ی Save state خود ورک‌فلو). اگه pull با تداخل مواجه
+    بشه، یا فایل نشونه‌های تداخل داشته باشه، یا رمزگشایی نشه، این دور کامیت
+    نمی‌شه — فایل خراب هیچ‌وقت کامیت نمی‌شه."""
     if not os.environ.get("GITHUB_ACTIONS"):
         return
     def git(*args):
@@ -2154,7 +2157,6 @@ def main():
         raise SystemExit(1)
     loop_minutes = LOOP_MINUTES
     end = time.time() + loop_minutes * 60 if loop_minutes > 0 else 0
-    last_commit = 0.0
     while True:
         try:
             run_once()
@@ -2162,9 +2164,6 @@ def main():
             raise
         except Exception as ex:
             print("خطا در این دور:", repr(ex))
-        if time.time() - last_commit >= COMMIT_EVERY_SEC:
-            commit_state()
-            last_commit = time.time()
         if loop_minutes <= 0:
             break
         if time.time() >= end:
