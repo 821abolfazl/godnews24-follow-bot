@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.23"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.24"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -374,7 +374,8 @@ def topic_keyboard(state=None):
 
 def _select_topics_keyboard(state, chat_id):
     """کیبورد «انتخاب موضوع»: همه‌ی موضوع‌های فعال؛ دنبال‌شده‌ها با ✅.
-    زدن هر موضوع دنبال کردن رو روشن/خاموش می‌کنه (تاگل)؛ اگه موضوعی نیست None."""
+    زدن هر موضوع دنبال کردن رو روشن/خاموش می‌کنه (تاگل)؛ اگه موضوعی نیست None.
+    دکمه‌ی «🔍 کلمه‌های من» ردیف تنها و بزرگ، درست قبل از «❌ لغو» میاد (نسخه‌ی ۰.۲۴)."""
     followed = set((state or {}).get("users", {}).get(str(chat_id), {}).get("topics", []))
     labels = []
     for k in active_topics(state):
@@ -388,6 +389,59 @@ def _select_topics_keyboard(state, chat_id):
     if not labels:
         return None
     rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
+    rows.append([{"text": FOLLOWWORD_BUTTON}])
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+FOLLOWWORD_BUTTON = "🔍 کلمه‌های من"
+MAX_FOLLOW_KEYWORDS = 5
+FOLLOWWORD_EXPLAIN = (
+    "🔍 دنبال کردن با کلمه‌ی دلخواه:\n\n"
+    "هر کلمه‌ای که اضافه کنی، هر خبری که اون کلمه داخلش باشه دایرکت برات میاد — "
+    "حتی اگه موضوع اون خبر رو دنبال نکرده باشی. مثلاً «پرسپولیس» یا «آیفون»."
+)
+
+
+def _user_keywords(state, chat_id):
+    """کلمه‌های دلخواه یه عضو (حداکثر ۵ تا)."""
+    return list((state or {}).get("users", {}).get(str(chat_id), {}).get("keywords", []))
+
+
+def _keyword_hit(text, kw):
+    """اگه کلمه‌ی دلخواه توی متن پست باشه True؛ بدون توجه به فاصله و نیم‌فاصله،
+    و ایموجی تنها هر جای متن باشه حساب می‌شه (مثل ممنوع‌ها)."""
+    if not kw:
+        return False
+    if _is_single_emoji(kw):
+        return _norm_emoji(kw) in _norm_emoji(text or "")
+    t = re.sub(r"[\s\u200c]+", "", text or "")
+    return re.sub(r"[\s\u200c]+", "", kw) in t
+
+
+def _followword_text(state, chat_id):
+    """متن هاب کلمه‌های دلخواه: توضیح چی هست + لیست کلمه‌های عضو."""
+    kws = _user_keywords(state, chat_id)
+    out = FOLLOWWORD_EXPLAIN + "\n\nکلمه‌های تو:\n"
+    if not kws:
+        out += "—\n\nهنوز کلمه‌ای نداری 🙂"
+    else:
+        out += "\n".join("• " + k for k in kws)
+        out += f"\n\n(حداکثر {MAX_FOLLOW_KEYWORDS} کلمه)"
+    return out
+
+
+def _followword_keyboard():
+    """کیبورد هاب کلمه‌های دلخواه: اضافه و حذف + بازگشت به انتخاب موضوع."""
+    rows = [[{"text": "➕ اضافه کردن کلمه"}, {"text": "➖ حذف کلمه"}],
+            [{"text": "🔙 برگشت به انتخاب موضوع"}]]
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _followword_items_keyboard(state, chat_id):
+    """دکمه‌های کلمه‌های عضو برای حذف (دو تا در هر ردیف) + لغو."""
+    kws = _user_keywords(state, chat_id)
+    rows = [[{"text": k} for k in kws[i:i + 2]] for i in range(0, len(kws), 2)]
     rows.append([{"text": "❌ لغو"}])
     return {"keyboard": rows, "resize_keyboard": True}
 
@@ -656,7 +710,7 @@ HELP_TEXT = (
     "📌 این ربات چیه؟\n"
     "ربات شخصی کانال @GodNews24؛ خبرهای مهم موضوع‌هایی که دنبال می‌کنی رو دایرکت برات می‌فرسته. "
     "بقیه‌ی خبرها فقط توی کانال منتشر می‌شن.\n\n"
-    "/select — انتخاب موضوع‌ها: دکمه‌ی «📌 انتخاب موضوع» رو بزن؛ موضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه\n"
+    "/select — انتخاب موضوع‌ها: دکمه‌ی «📌 انتخاب موضوع» رو بزن؛ موضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه؛ دکمه‌ی «🔍 کلمه‌های من» هم توی همین لیسته، برای دنبال کردن با کلمه‌ی دلخواه\n"
     "/follow — دنبال کردن مستقیم یه موضوع: بنویس /follow سیاسی\n"
     "/topics — موضوع‌هایی که دنبال می‌کنی\n"
     "/unfollow — لغو دنبال کردن یه موضوع (یا «همه» برای لغو همه)\n"
@@ -694,7 +748,8 @@ COMMAND_HELP = {
                 "• مستقیم بنویس: /follow سیاسی"),
     "/select": ("انتخاب موضوع‌ها:\n\n"
                 "دکمه‌ی «📌 انتخاب موضوع» رو بزن؛ همه‌ی موضوع‌ها توی یه لیست میان و موضوع‌هایی که دنبال می‌کنی ✅ دارن.\n"
-                "زدن یه موضوع دنبال کردنش رو روشن می‌کنه و زدن دوباره‌ش لغوش می‌کنه."),
+                "زدن یه موضوع دنبال کردنش رو روشن می‌کنه و زدن دوباره‌ش لغوش می‌کنه.\n"
+                "دکمه‌ی «🔍 کلمه‌های من» هم توی همین لیسته؛ با کلمه‌ی دلخواه (مثلاً «پرسپولیس») هم می‌تونی خبر بگیری."),
     "/topics": ("موضوع‌هایی که الان دنبال می‌کنی رو نشون می‌ده.\n\n"
                 "برای دیدنش بنویس /topics یا دکمه‌ی «📋 موضوع‌های من» رو بزن."),
     "/unfollow": ("لغو دنبال کردن یه موضوع:\n\n"
@@ -1204,7 +1259,8 @@ def _send_followers(state, chat_id):
     listed = []
     for uid, u in state.get("users", {}).items():
         ts = [k for k in u.get("topics", []) if k in counts]
-        if not ts:
+        kws = u.get("keywords", []) or []
+        if not ts and not kws:
             continue
         total += 1
         for k in ts:
@@ -1213,6 +1269,8 @@ def _send_followers(state, chat_id):
         uname = (u.get("username") or "").strip()
         who = f"{name} (@{uname})" if uname else name
         tstr = "، ".join(topic_label(state, k) for k in ts)
+        if kws:
+            tstr = (tstr + " — " if tstr else "") + f"🔍 {len(kws)} کلمه"
         listed.append((name.lower(), f"• {who} — {tstr}"))
     lines = "\n".join(f"{topic_label(state, k)}: {counts[k]}" for k in keys)
     _reset_forward_counts_if_new_day(state)
@@ -1316,6 +1374,40 @@ def handle_message(state, msg):
         return True
     if text == "📌 انتخاب موضوع" or text == "/select":
         pending.pop(chat_id, None)
+        _open_select_picker(state, chat_id,
+                            "موضوع‌هایی که می‌خوای دنبال کنی رو انتخاب کن؛\nموضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه:")
+        return True
+    if text == FOLLOWWORD_BUTTON:
+        # دکمه‌ی کلمه‌های دلخواه داخل «انتخاب موضوع»: اول توضیح می‌ده چی هست، بعد هاب
+        pending[chat_id] = {"cmd": "/followword", "step": "hub", "ts": time.time()}
+        send_message(chat_id, _followword_text(state, chat_id), reply_markup=_followword_keyboard())
+        return True
+    if text == "➕ اضافه کردن کلمه":
+        entry = pending.get(chat_id) or {}
+        if entry.get("cmd") != "/followword":
+            pending[chat_id] = {"cmd": "/followword", "step": "hub", "ts": time.time()}
+            send_message(chat_id, _followword_text(state, chat_id), reply_markup=_followword_keyboard())
+            return True
+        pending[chat_id] = {"cmd": "/followword", "step": "add", "ts": time.time()}
+        send_message(chat_id, "کلمه‌ی دلخواهت رو بفرست (می‌تونه چند کلمه باشه؛ با کاما چندتا همزمان هم می‌شه):",
+                     reply_markup=CANCEL_KEYBOARD)
+        return True
+    if text == "➖ حذف کلمه":
+        entry = pending.get(chat_id) or {}
+        if entry.get("cmd") != "/followword":
+            pending[chat_id] = {"cmd": "/followword", "step": "hub", "ts": time.time()}
+            send_message(chat_id, _followword_text(state, chat_id), reply_markup=_followword_keyboard())
+            return True
+        kws = _user_keywords(state, chat_id)
+        if not kws:
+            send_message(chat_id, "کلمه‌ای نداری که حذف بشه 🙂\n\n" + _followword_text(state, chat_id),
+                         reply_markup=_followword_keyboard())
+            return True
+        pending[chat_id] = {"cmd": "/followword", "step": "remove", "ts": time.time()}
+        send_message(chat_id, "کدوم کلمه رو حذف کنم؟",
+                     reply_markup=_followword_items_keyboard(state, chat_id))
+        return True
+    if text == "🔙 برگشت به انتخاب موضوع":
         _open_select_picker(state, chat_id,
                             "موضوع‌هایی که می‌خوای دنبال کنی رو انتخاب کن؛\nموضوع‌های دنبال‌شده ✅ دارن و زدن دوباره‌شون لغوشون می‌کنه:")
         return True
@@ -1801,6 +1893,71 @@ def handle_message(state, msg):
                 send_message(chat_id, f"دنبال کردن «{label}» فعال شد ✅\nخبرهای مهمش دایرکت برات میاد.",
                              reply_markup=_select_topics_keyboard(state, chat_id))
             return True
+        if cmd == "/followword":
+            # کلمه‌های دلخواه: اضافه (یه عبارت کامل؛ با کاما چندتا همزمان)، حذف، یا هاب
+            if entry.get("step") == "add":
+                if "،" in text or "," in text:
+                    kws = [k.strip() for k in re.split(r"[،,]", text) if k.strip()]
+                else:
+                    kws = [text.strip()] if text.strip() else []
+                if not kws:
+                    send_message(chat_id, "کلمه‌ای نفرستادی؛ کلمه رو بفرست:",
+                                 reply_markup=CANCEL_KEYBOARD)
+                    pending[chat_id] = entry
+                    return True
+                cur = _user_keywords(state, chat_id)
+                added, dup, bad = [], [], []
+                for k in kws:
+                    if _is_single_emoji(k):
+                        ok = True
+                    elif 2 <= len(k) <= 30:
+                        ok = True
+                    else:
+                        ok = False
+                    if not ok:
+                        bad.append(k)
+                    elif k in cur or k in added:
+                        dup.append(k)
+                    elif len(cur) + len(added) >= MAX_FOLLOW_KEYWORDS:
+                        bad.append(k)
+                    else:
+                        added.append(k)
+                if added:
+                    u = state.setdefault("users", {}).setdefault(chat_id, {"topics": []})
+                    u["keywords"] = cur + added
+                parts = []
+                if added:
+                    parts.append("✅ اضافه شد: " + "، ".join(added))
+                if dup:
+                    parts.append("از قبل داشتی: " + "، ".join(dup))
+                if bad:
+                    parts.append("نشد (خیلی کوتاه/بلند یا سقف ۵ کلمه پره): " + "، ".join(bad))
+                entry["step"] = "hub"
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, "\n".join(parts) + "\n\n" + _followword_text(state, chat_id),
+                             reply_markup=_followword_keyboard())
+                return True
+            if entry.get("step") == "remove":
+                kws = _user_keywords(state, chat_id)
+                if text not in kws:
+                    send_message(chat_id, "این کلمه توی لیستت نیست؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=_followword_items_keyboard(state, chat_id))
+                    pending[chat_id] = entry
+                    return True
+                kws.remove(text)
+                state["users"][chat_id]["keywords"] = kws
+                entry["step"] = "hub"
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"✅ «{text}» حذف شد.\n\n" + _followword_text(state, chat_id),
+                             reply_markup=_followword_keyboard())
+                return True
+            # قدم هاب: هر متن دیگه → نشون دادن دوباره‌ی هاب
+            entry["ts"] = time.time()
+            pending[chat_id] = entry
+            send_message(chat_id, _followword_text(state, chat_id), reply_markup=_followword_keyboard())
+            return True
         if cmd == "/unfollow":
             if text == "همه":
                 state.get("users", {}).get(chat_id, {})["topics"] = []
@@ -2035,12 +2192,18 @@ def handle_channel_post(state, post):
     if blocked_topics:
         print(f"post {post_id} blocked for topics={sorted(blocked_topics)}")
         topics = topics - blocked_topics
-    if not topics:
-        return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
     targets = set()
     for uid, u in state.get("users", {}).items():
         if set(u.get("topics", [])) & topics:
             targets.add(uid)
+    # نسخه‌ی ۰.۲۴: کلمه‌های دلخواه — مستقل از موضوع؛ پستی که کلمه‌ی کاربر رو
+    # داشته باشه براش می‌رسه (حتی اگه موضوعش رو دنبال نکرده باشه یا پست اصلاً
+    # موضوعی نداشته باشه). یکی بودن targets یعنی دوبار فوروارد نمی‌شه.
+    for uid, u in state.get("users", {}).items():
+        if any(_keyword_hit(text, kw) for kw in u.get("keywords", [])):
+            targets.add(uid)
+    if not targets:
+        return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
     sent = 0
     sent_uids = set()
     for uid in sorted(targets):

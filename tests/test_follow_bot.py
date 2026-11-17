@@ -138,7 +138,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.23")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.24")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2144,6 +2144,99 @@ class FollowBotTest(unittest.TestCase):
             fb.TOKEN, fb.LOOP_MINUTES = orig_token, orig_loop
         self.assertEqual(calls["run_once"], 1)
         self.assertEqual(calls["commit"], 1)
+
+    # ---- 0.24: دنبال کردن با کلمه‌ی دلخواه (داخل «انتخاب موضوع») ----
+    def _open_followword_hub(self):
+        self.send(USER_A, "📌 انتخاب موضوع")
+        self.send(USER_A, "🔍 کلمه‌های من")
+
+    def test_select_picker_has_followword_button_before_cancel(self):
+        kb = fb._select_topics_keyboard(self.state, USER_A)
+        rows = kb["keyboard"]
+        self.assertEqual(rows[-2], [{"text": "🔍 کلمه‌های من"}])
+        self.assertEqual(rows[-1], [{"text": "❌ لغو"}])
+
+    def test_followword_button_explains_what_it_is(self):
+        self._open_followword_hub()
+        self.assertIn("کلمه‌ی دلخواه", self.last_text())
+        self.assertIn("پرسپولیس", self.last_text())
+        self.assertEqual(self.state["pending"][USER_A]["cmd"], "/followword")
+
+    def test_followword_add_via_hub(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.assertIn("پرسپولیس", fb._user_keywords(self.state, USER_A))
+        self.assertIn("اضافه شد", self.last_text())
+
+    def test_followword_phrase_stays_one_keyword(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "تیم ملی")
+        self.assertEqual(fb._user_keywords(self.state, USER_A), ["تیم ملی"])
+
+    def test_followword_add_comma_list(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس، استقلال")
+        self.assertEqual(fb._user_keywords(self.state, USER_A), ["پرسپولیس", "استقلال"])
+
+    def test_followword_rejects_dup_short_and_over_limit(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.assertIn("از قبل", self.last_text())
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "ا")
+        self.assertIn("نشد", self.last_text())
+        for w in ["آبی", "قرمز", "سبز", "زرد"]:
+            self.send(USER_A, "➕ اضافه کردن کلمه")
+            self.send(USER_A, w)
+        self.assertEqual(len(fb._user_keywords(self.state, USER_A)), 5)
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "بنفش")
+        self.assertIn("نشد", self.last_text())
+        self.assertEqual(len(fb._user_keywords(self.state, USER_A)), 5)
+
+    def test_followword_remove_and_back_to_picker(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_A, "➖ حذف کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.assertEqual(fb._user_keywords(self.state, USER_A), [])
+        self.assertIn("حذف شد", self.last_text())
+        self.send(USER_A, "🔙 برگشت به انتخاب موضوع")
+        self.assertEqual(self.state["pending"][USER_A]["cmd"], "/select")
+
+    def test_keyword_post_forwarded_without_topic(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        fb.handle_channel_post(self.state, make_channel_post(
+            950, "🔵 فیلم تازه اکران شد؛ پرسپولیس مهمان برنامه است"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 950)])
+
+    def test_keyword_and_topic_post_forwarded_once(self):
+        self.send(USER_A, "/follow ورزشی")
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        fb.handle_channel_post(self.state, make_channel_post(951, "⚽ پرسپولیس قهرمان شد"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 951)])
+
+    def test_keyword_hit_ignores_zwnj(self):
+        self.assertTrue(fb._keyword_hit("تیم‌ملی به فینال رفت", "تیم ملی"))
+        self.assertFalse(fb._keyword_hit("خبر مهم سیاسی", "پرسپولیس"))
+
+    def test_followers_lists_keyword_only_user(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(ADMIN, "/followers")
+        self.assertIn("🔍 1 کلمه", self.last_text())
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
