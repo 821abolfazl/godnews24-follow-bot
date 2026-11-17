@@ -139,7 +139,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.26")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.27")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -222,9 +222,12 @@ class FollowBotTest(unittest.TestCase):
         self.send(USER_A, "/help")
         txt = self.last_text()
         self.assertIn("این ربات چیه؟", txt)
-        self.assertIn("/follow", txt)
-        self.assertIn("/follow سیاسی", txt)
-        self.assertIn("/help /follow", txt)
+        self.assertIn("📌 انتخاب موضوع", txt)
+        self.assertIn("📋 موضوع‌های من", txt)
+        self.assertIn("📤 ارسال خبر", txt)
+        # راهنمای اعضا با دکمه‌های منو توضیح داده می‌شه، نه با کد دستوری
+        self.assertNotIn("/follow", txt)
+        self.assertNotIn("/help", txt)
 
     def test_help_command_detail(self):
         self.send(USER_A, "/help /follow")
@@ -627,13 +630,13 @@ class FollowBotTest(unittest.TestCase):
 
     def test_help_lists_commands(self):
         self.send(USER_A, "/help")
-        self.assertIn("/follow", self.last_text())
-        self.assertIn("/unfollow", self.last_text())
-        self.assertIn("/topics", self.last_text())
+        txt = self.last_text()
+        self.assertIn("📌 انتخاب موضوع", txt)
+        self.assertIn("📋 موضوع‌های من", txt)
 
     def test_help_lists_send_for_members(self):
         self.send(USER_A, "/help")
-        self.assertIn("/send", self.last_text())
+        self.assertIn("📤 ارسال خبر", self.last_text())
 
     def test_help_admin_sees_admin_commands(self):
         self.send(ADMIN, "/help")
@@ -1701,7 +1704,7 @@ class FollowBotTest(unittest.TestCase):
 
     def test_help_lists_clear(self):
         self.send(USER_A, "/help")
-        self.assertIn("/clear", self.last_text())
+        self.assertIn("🗑 پاک کردن همه‌ی خبرها", self.last_text())
         self.send(USER_A, "/help /clear")
         self.assertIn("پاک کردن همه‌ی خبرها", self.last_text())
 
@@ -1832,7 +1835,7 @@ class FollowBotTest(unittest.TestCase):
 
     def test_help_lists_select(self):
         self.send(USER_A, "/help")
-        self.assertIn("/select", self.last_text())
+        self.assertIn("📌 انتخاب موضوع", self.last_text())
         self.send(USER_A, "/help /select")
         self.assertIn("✅", self.last_text())
 
@@ -2319,6 +2322,35 @@ class FollowBotTest(unittest.TestCase):
         self.state["topic_forward_day"] = "2000-01-01"
         fb.handle_channel_post(self.state, make_channel_post(962, "🔴 خبر مهم سیاسی"))
         self.assertEqual(self.state.get("keyword_forward_count"), 0)
+
+    # ---- 0.27: راهنمای کامل و دسته‌بندی‌شده برای اعضا و ادمین ----
+    def test_help_member_explains_keywords(self):
+        self.send(USER_A, "/help")
+        txt = self.last_text()
+        self.assertIn("کلمه‌ی دلخواه", txt)
+        self.assertIn("حداکثر ۵ کلمه", txt)
+        self.assertIn("پرسپولیس", txt)
+        self.assertIn("عضو کانال", txt)
+
+    def test_help_followword_detail(self):
+        self.send(USER_A, "/help /followword")
+        txt = self.last_text()
+        self.assertIn("کلمه‌ی دلخواه", txt)
+        self.assertIn("۵ کلمه", txt)
+        self.assertNotIn("راهنمای ربات خبررسان", txt)
+
+    def test_help_admin_explains_keyword_stats(self):
+        self.send(ADMIN, "/help")
+        txt = self.last_text()
+        self.assertIn("کلمه‌ی دلخواه", txt)
+        self.assertIn("/followers", txt)
+        self.assertNotIn("/follow ", txt)
+        self.assertNotIn("/topics", txt)
+        self.assertNotIn("/send", txt)
+
+    def test_help_topics_detail_mentions_keywords(self):
+        self.send(USER_A, "/help /topics")
+        self.assertIn("کلمه‌های دلخواهت", self.last_text())
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
