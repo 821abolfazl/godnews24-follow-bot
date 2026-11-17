@@ -138,7 +138,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.21")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.22")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2070,6 +2070,60 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("/block", self.last_text())
         self.send(USER_A, "/help /block")
         self.assertNotIn("ممنوع", self.last_text())
+
+    # ---- 0.22: /rules shows all admin customizations ----
+    def test_rules_text_full(self):
+        self.send(ADMIN, "/addtopic سینما فیلم سینما")
+        self.send(ADMIN, "/addtopic سیاسی کودتا")
+        self.send(ADMIN, "/block سیاسی موشکی 🚫")
+        self.send(ADMIN, "/block سینما خشونت")
+        self.state["topic_removed_keywords"] = {"political": ["مجلس"]}
+        self.send(ADMIN, "/removetopic ورزشی")
+        txt = fb._rules_text(self.state)
+        self.assertIn("📜 تنظیمات فعلی", txt)
+        self.assertIn("🔴 سیاسی:", txt)
+        self.assertIn("➕ اضافه‌شده: کودتا", txt)
+        self.assertIn("➖ حذف‌شده: مجلس", txt)
+        self.assertNotIn("مجلس", txt.split("کلمه‌ها:")[1].split("\n")[0])
+        self.assertIn("🚫 ممنوع: موشکی، 🚫", txt)
+        self.assertIn("سینما:", txt)
+        self.assertIn("کلمه‌ها: فیلم، سینما", txt)
+        self.assertIn("🚫 ممنوع: خشونت", txt)
+        self.assertIn("❌ موضوع‌های حذف‌شده:", txt)
+        self.assertIn("ورزشی", txt)
+
+    def test_rules_text_empty_state(self):
+        txt = fb._rules_text(self.state)
+        self.assertIn("📜 تنظیمات فعلی", txt)
+        self.assertIn("🔴 سیاسی:", txt)
+        self.assertIn("⚽ ورزشی:", txt)
+        self.assertIn("🟡 طلا و دلار:", txt)
+        self.assertNotIn("🚫 ممنوع", txt)
+        self.assertNotIn("حذف‌شده", txt)
+
+    def test_rules_command_admin_only(self):
+        self.send(ADMIN, "/rules")
+        self.assertIn("📜 تنظیمات فعلی", self.last_text())
+        self.send(ADMIN, "📜 قوانین")
+        self.assertIn("📜 تنظیمات فعلی", self.last_text())
+        self.send(USER_A, "/rules")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+        self.send(USER_A, "📜 قوانین")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+
+    def test_rules_button_is_third_command(self):
+        texts = [b["text"] for row in fb.main_keyboard(ADMIN, self.state)["keyboard"] for b in row]
+        self.assertEqual(texts[2], "📜 قوانین")
+        self.assertEqual(texts[:3], ["👥 دنبال‌کننده‌ها", "📣 پیام به اعضا", "📜 قوانین"])
+        self.assertEqual(texts[3], "🔧 تغییرات موضوع")
+        texts = [b["text"] for row in fb.main_keyboard(USER_A, self.state)["keyboard"] for b in row]
+        self.assertNotIn("📜 قوانین", texts)
+
+    def test_help_rules_admin_only(self):
+        self.send(ADMIN, "/help /rules")
+        self.assertIn("/rules", self.last_text())
+        self.send(USER_A, "/help /rules")
+        self.assertNotIn("تنظیمات", self.last_text())
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""

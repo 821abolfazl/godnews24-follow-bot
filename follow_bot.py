@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.21"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.22"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -278,6 +278,7 @@ def _sweep_followers(state):
 # ====== کیبوردها ======
 ADMIN_BUTTONS = [
     [{"text": "👥 دنبال‌کننده‌ها"}, {"text": "📣 پیام به اعضا"}],
+    [{"text": "📜 قوانین"}],
     [{"text": "🔧 تغییرات موضوع"}],
     [{"text": "🔑 کلمه‌های کلیدی"}],
     [{"text": "🚫 کلمات ممنوع"}],
@@ -553,6 +554,42 @@ def _blocked_items_keyboard(state, key):
     return {"keyboard": rows, "resize_keyboard": True}
 
 
+def _rules_text(state):
+    """متن تنظیمات فعلی ربات برای /rules: موضوع‌ها و کلمه‌هاشون،
+    موضوع‌های حذف‌شده و کلمه/ایموجی‌های ممنوع هر موضوع (نسخه‌ی ۰.۲۲)."""
+    lines = ["📜 تنظیمات فعلی ربات خبررسان:", ""]
+    for k in active_topics(state):
+        label = topic_label(state, k)
+        lines.append(f"{label}:")
+        kws = _topic_keywords(state, k)
+        lines.append("کلمه‌ها: " + ("، ".join(kws) if kws else "—"))
+        extras = (state.get("topic_extra_keywords") or {}).get(k, [])
+        removed = (state.get("topic_removed_keywords") or {}).get(k, [])
+        if extras:
+            lines.append("➕ اضافه‌شده: " + "، ".join(extras))
+        if removed:
+            lines.append("➖ حذف‌شده: " + "، ".join(removed))
+        blocked = (state.get("topic_blocked") or {}).get(k, [])
+        if blocked:
+            lines.append("🚫 ممنوع: " + "، ".join(blocked))
+        lines.append("")
+    for c in (state.get("custom_topics") or {}).values():
+        name = c.get("name", "")
+        if not name:
+            continue
+        lines.append(f"{name}:")
+        kws = c.get("keywords", [])
+        lines.append("کلمه‌ها: " + ("، ".join(kws) if kws else "—"))
+        blocked = (state.get("topic_blocked") or {}).get(name, [])
+        if blocked:
+            lines.append("🚫 ممنوع: " + "، ".join(blocked))
+        lines.append("")
+    disabled = [topic_label(state, k) for k in (state.get("disabled_topics") or []) if k in TOPICS]
+    if disabled:
+        lines.append("❌ موضوع‌های حذف‌شده: " + "، ".join(disabled))
+    return "\n".join(lines).rstrip()
+
+
 _EMOJI_LEAD = re.compile(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]\s*")
 
 
@@ -641,7 +678,8 @@ ADMIN_HELP_TEXT = (
     "/addkeyword — اضافه کردن کلمه‌ی کلیدی به یه موضوع: /addkeyword (یا /addkeyword <نام موضوع> <کلمه> ...)\n"
     "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
     "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n"
-    "/block — کلمه یا ایموجی ممنوع برای یه موضوع: /block (انتخاب موضوع) یا /block <موضوع> <کلمه> ...؛ پستی که یکی از این‌ها رو داشته باشه برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه (دکمه‌ی «🚫 کلمات ممنوع»)\n\n"
+    "/block — کلمه یا ایموجی ممنوع برای یه موضوع: /block (انتخاب موضوع) یا /block <موضوع> <کلمه> ...؛ پستی که یکی از این‌ها رو داشته باشه برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه (دکمه‌ی «🚫 کلمات ممنوع»)\n"
+    "/rules — تنظیمات فعلی ربات: موضوع‌ها، کلمه‌های کلیدی و کلمه/ایموجی‌های ممنوع هر موضوع (دکمه‌ی «📜 قوانین»)\n\n"
     "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
 )
 
@@ -710,6 +748,9 @@ COMMAND_HELP = {
                "• بنویس /block و موضوع رو انتخاب کن؛ بعد با دکمه‌ها اضافه یا حذف کن\n"
                "• مستقیم: /block <موضوع> <کلمه> ... (چندتا همزمان؛ با کاما عبارت چندکلمه‌ای بده)\n"
                "• دکمه‌ی «🚫 کلمات ممنوع» توی منوی ادمین"),
+    "/rules": ("تنظیمات فعلی ربات رو نشون می‌ده:\n\n"
+               "موضوع‌ها و کلمه‌های کلیدی‌شون، موضوع‌های حذف‌شده و کلمه/ایموجی‌های ممنوع هر موضوع.\n"
+               "بنویس /rules یا دکمه‌ی «📜 قوانین» رو بزن."),
 }
 
 
@@ -1407,6 +1448,12 @@ def handle_message(state, msg):
         else:
             ok, reply = _remove_custom_topic(state, name_raw)
         send_message(chat_id, reply, reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "/rules" or text == "📜 قوانین":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        send_message(chat_id, _rules_text(state), reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/keywords" or text.startswith("/keywords ") or text == "🔑 کلمه‌های کلیدی":
         if chat_id != ADMIN_CHAT_ID:
