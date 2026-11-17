@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -138,7 +139,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.24")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.25")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -855,7 +856,8 @@ class FollowBotTest(unittest.TestCase):
             self.state["users"][uid] = {"topics": ["political"], "name": f"کاربر{i:02d}"}
         self.send(ADMIN, "/followers")
         txt = self.last_text()
-        self.assertEqual(txt.count("• "), 30)
+        numbered = [l for l in txt.splitlines() if re.match(r"^[۰-۹]+\. ", l)]
+        self.assertEqual(len(numbered), 30)
         self.assertIn("و 5 نفر دیگر", txt)
 
     # ---- 0.02: custom topics ----
@@ -2236,7 +2238,31 @@ class FollowBotTest(unittest.TestCase):
         self.send(USER_A, "➕ اضافه کردن کلمه")
         self.send(USER_A, "پرسپولیس")
         self.send(ADMIN, "/followers")
-        self.assertIn("🔍 1 کلمه", self.last_text())
+        self.assertIn("🔍 پرسپولیس", self.last_text())
+
+    # ---- 0.25: تعداد کلمه‌دلخواه‌ها + نمایش کلمه‌ها + شماره‌گذاری در /followers ----
+    def test_followers_shows_keyword_user_count(self):
+        self.state["users"]["111"] = {"topics": [], "keywords": ["پرسپولیس"], "name": "علی"}
+        self.state["users"]["222"] = {"topics": ["sport"], "keywords": ["آیفون", "تیم ملی"], "name": "مریم"}
+        self.state["users"]["333"] = {"topics": ["political"], "name": "رضا"}
+        self.send(ADMIN, "/followers")
+        self.assertIn("🔍 کلمه‌ی دلخواه: 2 نفر", self.last_text())
+
+    def test_followers_shows_each_users_keywords(self):
+        self.state["users"]["111"] = {"topics": [], "keywords": ["پرسپولیس"], "name": "علی"}
+        self.state["users"]["222"] = {"topics": ["sport"], "keywords": ["آیفون", "تیم ملی"], "name": "مریم"}
+        self.send(ADMIN, "/followers")
+        txt = self.last_text()
+        self.assertIn("علی — 🔍 پرسپولیس", txt)
+        self.assertIn("مریم — ⚽ ورزشی — 🔍 آیفون، تیم ملی", txt)
+
+    def test_followers_numbers_people(self):
+        self.send_as(USER_A, "/follow سیاسی", first_name="علی", username="ali123")
+        self.send_as(USER_B, "/follow ورزشی", first_name="مریم")
+        self.send(ADMIN, "/followers")
+        txt = self.last_text()
+        self.assertIn("۱. علی (@ali123) — 🔴 سیاسی", txt)
+        self.assertIn("۲. مریم — ⚽ ورزشی", txt)
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""

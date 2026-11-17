@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.24"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.25"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -520,6 +520,11 @@ def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
 
 
 _EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF]")
+
+
+def _fa_digits(n):
+    """عدد رو با ارقام فارسی برمی‌گردونه (برای شماره‌گذاری لیست‌ها)."""
+    return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
 
 
 def _norm_emoji(tok):
@@ -1256,6 +1261,7 @@ def _send_followers(state, chat_id):
     keys = active_topics(state) + list(state.get("custom_topics", {}))
     counts = {k: 0 for k in keys}
     total = 0
+    kw_users = 0
     listed = []
     for uid, u in state.get("users", {}).items():
         ts = [k for k in u.get("topics", []) if k in counts]
@@ -1263,6 +1269,8 @@ def _send_followers(state, chat_id):
         if not ts and not kws:
             continue
         total += 1
+        if kws:
+            kw_users += 1
         for k in ts:
             counts[k] += 1
         name = (u.get("name") or "").strip() or uid
@@ -1270,9 +1278,10 @@ def _send_followers(state, chat_id):
         who = f"{name} (@{uname})" if uname else name
         tstr = "، ".join(topic_label(state, k) for k in ts)
         if kws:
-            tstr = (tstr + " — " if tstr else "") + f"🔍 {len(kws)} کلمه"
-        listed.append((name.lower(), f"• {who} — {tstr}"))
+            tstr = (tstr + " — " if tstr else "") + f"🔍 {'، '.join(kws)}"
+        listed.append((name.lower(), f"{who} — {tstr}"))
     lines = "\n".join(f"{topic_label(state, k)}: {counts[k]}" for k in keys)
+    lines += f"\n🔍 کلمه‌ی دلخواه: {kw_users} نفر"
     _reset_forward_counts_if_new_day(state)
     fcounts = state.get("topic_forward_counts", {}) or {}
     flines = "\n".join(f"{topic_label(state, k)}: {fcounts.get(k, 0)}" for k in keys)
@@ -1280,7 +1289,8 @@ def _send_followers(state, chat_id):
            f"📊 خبرهای ارسال‌شده برای هر موضوع:\n{flines}")
     if listed:
         listed.sort(key=lambda row: row[0])
-        out += "\n\n" + "\n".join(row[1] for row in listed[:30])
+        numbered = [f"{_fa_digits(i)}. {row[1]}" for i, row in enumerate(listed[:30], 1)]
+        out += "\n\n" + "\n".join(numbered)
         if len(listed) > 30:
             out += f"\nو {len(listed) - 30} نفر دیگر"
     send_message(chat_id, out, reply_markup=main_keyboard(chat_id, state))
