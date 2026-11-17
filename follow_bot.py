@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.18"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.19"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -353,6 +353,7 @@ def main_keyboard(chat_id=None, state=None):
         return {"keyboard": rows, "resize_keyboard": True}
     rows = [[{"text": "📌 انتخاب موضوع"}]]
     rows.append([{"text": "📋 موضوع‌های من"}])
+    rows.append([{"text": "📤 ارسال خبر"}])
     rows.append([{"text": "🗑 پاک کردن همه‌ی خبرها"}])
     rows.append([{"text": "❓ راهنما"}])
     return {"keyboard": rows, "resize_keyboard": True}
@@ -516,9 +517,7 @@ WELCOME_INTRO = (
     "موضوع‌هایی که دوست داری رو انتخاب کن تا خبرهای مهم همون موضوع برات بیاد:\n"
 )
 
-WELCOME_OUTRO = ("\n\nبرای دنبال کردن، دکمه‌ی «📌 انتخاب موضوع» رو بزن یا /follow رو بفرست.\n"
-                 "اگه خبر، عکس یا فیلمی داری، با /send برام بفرست تا برای ادمین بره.\n"
-                 "راهنما: /help")
+WELCOME_OUTRO = "\n\nبرای استفاده از ربات، از دکمه‌های منوی پایین استفاده کن 🙂"
 
 ADMIN_WELCOME_TEXT = (
     "سلام! 👋 این ربات خبررسان GodNews24 رو مدیریت می‌کنی.\n\n"
@@ -577,7 +576,7 @@ COMMAND_HELP = {
                   "• برای لغو همه‌ی موضوع‌ها بنویس: «همه»"),
     "/send": ("ارسال خبر برای ادمین:\n\n"
               "خبر، عکس یا فیلمت رو بفرست تا برای ادمین بره؛ بعد از تایید توی کانال @GodNews24 منتشر می‌شه.\n"
-              "کافیه بنویسی /send و بعد پیامت رو بفرستی."),
+              "دکمه‌ی «📤 ارسال خبر» رو بزن و بعد پیامت رو بفرست؛ یا بنویس /send و بعد پیامت رو بفرست."),
     "/clear": ("پاک کردن همه‌ی خبرها:\n\n"
                "همه‌ی خبرهایی که ربات تا حالا برات فرستاده (خبرهای موضوع‌ها و پیام‌های ادمین) از چتت پاک می‌شن.\n\n"
                "بنویس /clear یا دکمه‌ی «🗑 پاک کردن همه‌ی خبرها» رو بزن."),
@@ -1399,8 +1398,8 @@ def handle_message(state, msg):
         send_message(chat_id, f"به {sent} نفر رسید، {failed} نفر ناموفق بود.",
                      reply_markup=main_keyboard(chat_id, state))
         return True
-    if text == "/send" or text.startswith("/send "):
-        if text == "/send":
+    if text == "/send" or text.startswith("/send ") or text == "📤 ارسال خبر":
+        if text == "/send" or text == "📤 ارسال خبر":
             pending[chat_id] = {"cmd": "/send", "ts": time.time()}
             send_message(chat_id, "خبر، عکس یا فیلمت رو بفرست 🙂", reply_markup=main_keyboard(chat_id, state))
             return True
