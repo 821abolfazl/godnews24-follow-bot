@@ -139,7 +139,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.25")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.26")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2263,6 +2263,62 @@ class FollowBotTest(unittest.TestCase):
         txt = self.last_text()
         self.assertIn("۱. علی (@ali123) — 🔴 سیاسی", txt)
         self.assertIn("۲. مریم — ⚽ ورزشی", txt)
+
+    # ---- 0.26: کلمه‌های دلخواه در /topics + آمار ارسال کلمه در /followers ----
+    def test_topics_shows_keywords_with_topics(self):
+        self.send(USER_A, "/follow سیاسی")
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_A, "/topics")
+        txt = self.last_text()
+        self.assertIn("🔴 سیاسی", txt)
+        self.assertIn("🔍 کلمه‌های دلخواهت:", txt)
+        self.assertIn("• پرسپولیس", txt)
+
+    def test_topics_shows_keywords_only(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_A, "/topics")
+        txt = self.last_text()
+        self.assertIn("🔍 کلمه‌های دلخواهت:", txt)
+        self.assertIn("• پرسپولیس", txt)
+        self.assertNotIn("هیچ موضوعی", txt)
+
+    def test_keyword_forward_count_counts_keyword_only(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_B, "/follow ورزشی")
+        fb.handle_channel_post(self.state, make_channel_post(960, "⚽ پرسپولیس قهرمان شد"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 960), (USER_B, 960)])
+        self.assertEqual(self.state.get("keyword_forward_count"), 1)
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {"sport": 1})
+
+    def test_keyword_forward_not_counted_when_topic_also_matches(self):
+        self.send(USER_A, "/follow ورزشی")
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        fb.handle_channel_post(self.state, make_channel_post(961, "⚽ پرسپولیس قهرمان شد"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 961)])
+        self.assertEqual(self.state.get("keyword_forward_count", 0), 0)
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {"sport": 1})
+
+    def test_followers_shows_keyword_forward_count(self):
+        self.state["keyword_forward_count"] = 7
+        self.state["topic_forward_day"] = fb._today_tehran()
+        self.send(ADMIN, "/followers")
+        tail = self.last_text().split("📊 خبرهای ارسال‌شده برای هر موضوع:")[1]
+        self.assertIn("🔍 کلمه‌ی دلخواه: 7", tail)
+
+    def test_keyword_forward_count_resets_on_new_day(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.state["keyword_forward_count"] = 5
+        self.state["topic_forward_day"] = "2000-01-01"
+        fb.handle_channel_post(self.state, make_channel_post(962, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.state.get("keyword_forward_count"), 0)
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.25"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.26"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -1285,6 +1285,7 @@ def _send_followers(state, chat_id):
     _reset_forward_counts_if_new_day(state)
     fcounts = state.get("topic_forward_counts", {}) or {}
     flines = "\n".join(f"{topic_label(state, k)}: {fcounts.get(k, 0)}" for k in keys)
+    flines += f"\n🔍 کلمه‌ی دلخواه: {state.get('keyword_forward_count', 0)}"
     out = (f"دنبال‌کننده‌ها (کل: {total} نفر):\n{lines}\n\n"
            f"📊 خبرهای ارسال‌شده برای هر موضوع:\n{flines}")
     if listed:
@@ -1357,12 +1358,18 @@ def handle_message(state, msg):
         topics = state.get("users", {}).get(chat_id, {}).get("topics", [])
         customs = state.get("custom_topics", {})
         shown = [k for k in topics if k in TOPICS or k in customs]
-        if not shown:
+        kws = state.get("users", {}).get(chat_id, {}).get("keywords", []) or []
+        if not shown and not kws:
             send_message(chat_id, "هنوز هیچ موضوعی رو دنبال نمی‌کنی.\nبا /follow یه موضوع انتخاب کن 🙂",
                          reply_markup=main_keyboard(chat_id, state))
         else:
-            lines = "\n".join("• " + topic_label(state, k) for k in shown)
-            send_message(chat_id, "موضوع‌هایی که دنبال می‌کنی:\n" + lines,
+            out = ""
+            if shown:
+                out = "موضوع‌هایی که دنبال می‌کنی:\n" + "\n".join("• " + topic_label(state, k) for k in shown)
+            if kws:
+                kw_lines = "\n".join("• " + k for k in kws)
+                out += ("\n\n" if out else "") + "🔍 کلمه‌های دلخواهت:\n" + kw_lines
+            send_message(chat_id, out,
                          reply_markup=main_keyboard(chat_id, state))
         return True
     if text == "/clear" or text == "🗑 پاک کردن همه‌ی خبرها":
@@ -2173,6 +2180,7 @@ def _reset_forward_counts_if_new_day(state):
     today = _today_tehran()
     if state.get("topic_forward_day") != today:
         state["topic_forward_counts"] = {}
+        state["keyword_forward_count"] = 0
         state["topic_forward_day"] = today
 
 
@@ -2206,6 +2214,7 @@ def handle_channel_post(state, post):
     for uid, u in state.get("users", {}).items():
         if set(u.get("topics", [])) & topics:
             targets.add(uid)
+    topic_targets = set(targets)
     # نسخه‌ی ۰.۲۴: کلمه‌های دلخواه — مستقل از موضوع؛ پستی که کلمه‌ی کاربر رو
     # داشته باشه براش می‌رسه (حتی اگه موضوعش رو دنبال نکرده باشه یا پست اصلاً
     # موضوعی نداشته باشه). یکی بودن targets یعنی دوبار فوروارد نمی‌شه.
@@ -2231,6 +2240,12 @@ def handle_channel_post(state, post):
         for t in topics:
             if any(t in (users.get(uid) or {}).get("topics", []) for uid in sent_uids):
                 counts[t] = counts.get(t, 0) + 1
+        # نسخه‌ی ۰.۲۶: فورواردِ کلمه‌ی دلخواه — فقط کسایی که خبر رو فقط به‌خاطر
+        # کلمه‌شون گرفتن (نه از راه موضوع)؛ اگه هم موضوع و هم کلمه هم‌زمان بود،
+        # اون فوروارد برای موضوع شمرده می‌شه، نه برای کلمه.
+        kw_sent = sent_uids - topic_targets
+        if kw_sent:
+            state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + len(kw_sent)
     print(f"forwarded post {post_id} topics={sorted(topics)} to {sent} follower(s)")
     return True
 
