@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.19"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.21"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -280,6 +280,7 @@ ADMIN_BUTTONS = [
     [{"text": "👥 دنبال‌کننده‌ها"}, {"text": "📣 پیام به اعضا"}],
     [{"text": "🔧 تغییرات موضوع"}],
     [{"text": "🔑 کلمه‌های کلیدی"}],
+    [{"text": "🚫 کلمات ممنوع"}],
 ]
 
 # کیبورد موقع قدم‌های جادوگر (فقط لغو)
@@ -464,6 +465,94 @@ def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
     return out
 
 
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF]")
+
+
+def _norm_emoji(tok):
+    """VS16 رو حذف می‌کنه (⛽️ همون ⛽ حساب می‌شه)."""
+    return (tok or "").replace("\uFE0F", "")
+
+
+def _is_single_emoji(tok):
+    """یه ایموجیِ تنها (بدون متن)؛ VS16 حذف می‌شه."""
+    t = _norm_emoji(tok)
+    return bool(t) and len(_EMOJI_RE.findall(t)) == 1 and not _EMOJI_RE.sub("", t).strip()
+
+
+def _blocked_hit(text, blocked):
+    """اگه پست یه کلمه یا ایموجی ممنوع داشته باشه، همون مورد رو برمی‌گردونه؛
+    وگرنه None. ایموجی هر جای متن باشه حساب می‌شه؛ کلمه‌ها بدون توجه به
+    فاصله و نیم‌فاصله چک می‌شن (مثلاً «قیمت طلا» با «قیمت‌طلا» هم می‌خوره)."""
+    t = text or ""
+    t_words = re.sub(r"[\s\u200c]+", "", t)
+    t_emoji = _norm_emoji(t)
+    for b in blocked or []:
+        if not b:
+            continue
+        if _is_single_emoji(b):
+            if _norm_emoji(b) in t_emoji:
+                return b
+        elif re.sub(r"[\s\u200c]+", "", b) in t_words:
+            return b
+    return None
+
+
+def _parse_block_args(text, state):
+    """«/block ...» رو تجزیه می‌کنه: (کلید موضوع، [توکن‌های کلمه‌ها]) یا (None, None).
+    موضوع با بلندترین پیشوندِ شناخته‌شده پیدا می‌شه (مثلاً «طلا و دلار»)."""
+    toks = text.split()[1:]  # بدون /block
+    if not toks:
+        return None, None
+    customs = state.get("custom_topics", {})
+    labels = state.get("topic_labels", {})
+    known = active_topics(state) + list(customs)
+    for n in range(len(toks), 0, -1):
+        key = _norm_topic(" ".join(toks[:n]), customs, labels)
+        if key and key in known:
+            return key, toks[n:]
+    return None, None
+
+
+def _add_blocked(state, key, items):
+    """کلمه/ایموجی ممنوع به یه موضوع اضافه می‌کنه؛ برمی‌گردونه (اضافه‌شده‌ها، تکراری‌ها)."""
+    lst = state.setdefault("topic_blocked", {}).setdefault(key, [])
+    added, dup = [], []
+    for it in items or []:
+        if it in lst:
+            dup.append(it)
+        else:
+            lst.append(it)
+            added.append(it)
+    return added, dup
+
+
+def _block_text(state, key):
+    """متن لیست ممنوع‌های یه موضوع (برای هاب /block)."""
+    label = topic_label(state, key)
+    items = (state.get("topic_blocked") or {}).get(key, [])
+    if not items:
+        return (f"🚫 کلمه‌ها و ایموجی‌های ممنوع برای «{label}»:\n—\n\n"
+                "هنوز چیزی ممنوع نیست 🙂")
+    return (f"🚫 کلمه‌ها و ایموجی‌های ممنوع برای «{label}»:\n" +
+            "\n".join("• " + b for b in items) +
+            "\n\nاگه پستی یکی از این‌ها رو داشته باشه، برای دنبال‌کننده‌های این موضوع فرستاده نمی‌شه.")
+
+
+def _block_keyboard():
+    """کیبورد هاب /block: اضافه و حذف ممنوع + بازگشت به منوی اصلی."""
+    rows = [[{"text": "➕ اضافه کردن ممنوع"}, {"text": "➖ حذف کردن ممنوع"}],
+            [{"text": "🔙 منوی اصلی"}]]
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _blocked_items_keyboard(state, key):
+    """دکمه‌های ممنوع‌های یه موضوع برای حذف (دو تا در هر ردیف) + لغو."""
+    items = (state.get("topic_blocked") or {}).get(key, [])
+    rows = [[{"text": it} for it in items[i:i + 2]] for i in range(0, len(items), 2)]
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
 _EMOJI_LEAD = re.compile(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]\s*")
 
 
@@ -551,7 +640,8 @@ ADMIN_HELP_TEXT = (
     "/keywords — لیست کلمه‌های کلیدی همه‌ی موضوع‌ها (یا یه موضوع: /keywords <نام>)؛ از همون‌جا با دکمه‌ها می‌تونی کلمه اضافه یا حذف کنی\n"
     "/addkeyword — اضافه کردن کلمه‌ی کلیدی به یه موضوع: /addkeyword (یا /addkeyword <نام موضوع> <کلمه> ...)\n"
     "/removekeyword — حذف یه کلمه‌ی کلیدی با انتخاب از لیست: /removekeyword (یا /removekeyword <نام موضوع>)\n"
-    "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n\n"
+    "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن (به همه یا فقط یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n"
+    "/block — کلمه یا ایموجی ممنوع برای یه موضوع: /block (انتخاب موضوع) یا /block <موضوع> <کلمه> ...؛ پستی که یکی از این‌ها رو داشته باشه برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه (دکمه‌ی «🚫 کلمات ممنوع»)\n\n"
     "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
 )
 
@@ -615,6 +705,11 @@ COMMAND_HELP = {
                    "• با دکمه‌ی «📣 پیام به اعضا»: اول گیرنده رو انتخاب کن («👥 به همه» یا یه موضوع)، بعد متن رو بفرست\n"
                    "• مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام\n"
                    "• برای موضوع سفارشی اولش اسم کاملش رو بنویس (مثلاً 🚨 جنگ)"),
+    "/block": ("کلمه‌ها و ایموجی‌های ممنوع برای هر موضوع جدا:\n\n"
+               "اگه پستی یه کلمه یا ایموجی ممنوعِ اون موضوع رو داشته باشه، برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه؛ موضوع‌های دیگه همون پست رو می‌گیرن.\n\n"
+               "• بنویس /block و موضوع رو انتخاب کن؛ بعد با دکمه‌ها اضافه یا حذف کن\n"
+               "• مستقیم: /block <موضوع> <کلمه> ... (چندتا همزمان؛ با کاما عبارت چندکلمه‌ای بده)\n"
+               "• دکمه‌ی «🚫 کلمات ممنوع» توی منوی ادمین"),
 }
 
 
@@ -1326,6 +1421,70 @@ def handle_message(state, msg):
                 return True
         send_message(chat_id, _keywords_text(state, key), reply_markup=_keywords_keyboard(state))
         return True
+    # نسخه‌ی ۰.۲۱: هر سه کار ممنوع‌ها (دیدن، اضافه، حذف) توی یه دستور /block؛
+    # ممنوع‌ها برای هر موضوع جداست. /block تنها → انتخاب موضوع، بعد هاب همون موضوع.
+    if text == "/block" or text.startswith("/block ") or text == "🚫 کلمات ممنوع":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        if text == "/block" or text == "🚫 کلمات ممنوع":
+            pending[chat_id] = {"cmd": "/block", "step": "topic", "ts": time.time()}
+            send_message(chat_id, "کلمه‌ی ممنوع برای کدوم موضوع؟",
+                         reply_markup=topic_keyboard(state))
+            return True
+        key, words = _parse_block_args(text, state)
+        if not key:
+            send_message(chat_id, "چنین موضوعی نداریم.\nمثال: /block سیاسی کلمه ...",
+                         reply_markup=main_keyboard(chat_id, state))
+            return True
+        if not words:
+            pending[chat_id] = {"cmd": "/block", "step": "hub", "topic": key, "ts": time.time()}
+            send_message(chat_id, _block_text(state, key), reply_markup=_block_keyboard())
+            return True
+        added, dup = _add_blocked(state, key, _parse_keywords(" ".join(words)))
+        parts = []
+        if added:
+            parts.append(f"✅ برای «{topic_label(state, key)}» ممنوع شد: " + "، ".join(added))
+        if dup:
+            parts.append("از قبل ممنوع بود: " + "، ".join(dup))
+        send_message(chat_id, "\n".join(parts), reply_markup=main_keyboard(chat_id, state))
+        return True
+    if text == "➕ اضافه کردن ممنوع":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        entry = pending.get(chat_id) or {}
+        key = entry.get("topic") if entry.get("cmd") == "/block" else None
+        if not key:
+            pending[chat_id] = {"cmd": "/block", "step": "topic", "ts": time.time()}
+            send_message(chat_id, "کلمه‌ی ممنوع برای کدوم موضوع؟",
+                         reply_markup=topic_keyboard(state))
+            return True
+        pending[chat_id] = {"cmd": "/block", "step": "add", "topic": key, "ts": time.time()}
+        send_message(chat_id, f"کلمه یا ایموجی ممنوع برای «{topic_label(state, key)}» رو بفرست (چندتا همزمان هم می‌شه؛ با کاما عبارت چندکلمه‌ای بده):",
+                     reply_markup=CANCEL_KEYBOARD)
+        return True
+    if text == "➖ حذف کردن ممنوع":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        entry = pending.get(chat_id) or {}
+        key = entry.get("topic") if entry.get("cmd") == "/block" else None
+        if not key:
+            pending[chat_id] = {"cmd": "/block", "step": "topic", "ts": time.time()}
+            send_message(chat_id, "کلمه‌ی ممنوع برای کدوم موضوع؟",
+                         reply_markup=topic_keyboard(state))
+            return True
+        items = (state.get("topic_blocked") or {}).get(key, [])
+        if not items:
+            pending[chat_id] = {"cmd": "/block", "step": "hub", "topic": key, "ts": time.time()}
+            send_message(chat_id, f"برای «{topic_label(state, key)}» چیزی ممنوع نیست که حذف بشه 🙂",
+                         reply_markup=_block_keyboard())
+            return True
+        pending[chat_id] = {"cmd": "/block", "step": "remove", "topic": key, "ts": time.time()}
+        send_message(chat_id, f"کدوم رو از ممنوع‌های «{topic_label(state, key)}» حذف کنم؟",
+                     reply_markup=_blocked_items_keyboard(state, key))
+        return True
     if text == "/removekeyword" or text.startswith("/removekeyword ") or text == "➖ حذف کلمه‌ی کلیدی":
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -1458,6 +1617,60 @@ def handle_message(state, msg):
         # جوابِ دستوری که منتظر آرگومان بود (/follow، /unfollow، /broadcast یا /send)
         cmd = entry["cmd"]
         pending.pop(chat_id, None)
+        if cmd == "/block":
+            if entry.get("step") == "topic":
+                key = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
+                if not key or key not in active_topics(state) + list(state.get("custom_topics", {})):
+                    send_message(chat_id, "این موضوع رو نمی‌شناسم؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=topic_keyboard(state))
+                    pending[chat_id] = entry
+                    return True
+                entry["step"] = "hub"
+                entry["topic"] = key
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, _block_text(state, key), reply_markup=_block_keyboard())
+                return True
+            if entry.get("step") == "hub":
+                key = entry.get("topic")
+                send_message(chat_id, _block_text(state, key), reply_markup=_block_keyboard())
+                pending[chat_id] = entry
+                return True
+            if entry.get("step") == "add":
+                key = entry.get("topic")
+                items = _parse_keywords(text)
+                if not key or not items:
+                    send_message(chat_id, "کلمه یا ایموجی‌ای نفرستادی؛ بفرست:",
+                                 reply_markup=CANCEL_KEYBOARD)
+                    pending[chat_id] = entry
+                    return True
+                added, dup = _add_blocked(state, key, items)
+                parts = []
+                if added:
+                    parts.append(f"✅ برای «{topic_label(state, key)}» ممنوع شد: " + "، ".join(added))
+                if dup:
+                    parts.append("از قبل ممنوع بود: " + "، ".join(dup))
+                entry["step"] = "hub"
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, "\n".join(parts) + "\n\n" + _block_text(state, key),
+                             reply_markup=_block_keyboard())
+                return True
+            if entry.get("step") == "remove":
+                key = entry.get("topic")
+                items = (state.get("topic_blocked") or {}).get(key, [])
+                if not key or text not in items:
+                    send_message(chat_id, "این مورد توی ممنوع‌ها نیست؛ روی یکی از دکمه‌ها بزن:",
+                                 reply_markup=_blocked_items_keyboard(state, key))
+                    pending[chat_id] = entry
+                    return True
+                items.remove(text)
+                entry["step"] = "hub"
+                entry["ts"] = time.time()
+                pending[chat_id] = entry
+                send_message(chat_id, f"✅ «{text}» از ممنوع‌های «{topic_label(state, key)}» حذف شد.\n\n" + _block_text(state, key),
+                             reply_markup=_block_keyboard())
+                return True
         if cmd == "/removekeyword":
             if entry.get("step") == "topic":
                 topic = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
@@ -1769,8 +1982,15 @@ def handle_channel_post(state, post):
                            state.get("disabled_topics", []),
                            state.get("topic_removed_keywords", {}))
     seen.append(post_id)
+    # نسخه‌ی ۰.۲۱: ممنوع‌ها برای هر موضوع جداست؛ پست فقط برای موضوع‌هایی که
+    # کلمه/ایموجی ممنوع‌شون رو داره فوروارد نمی‌شه (موضوع‌های دیگه می‌گیرنش).
+    blocked_topics = {t for t in topics
+                      if _blocked_hit(text, (state.get("topic_blocked") or {}).get(t, []))}
+    if blocked_topics:
+        print(f"post {post_id} blocked for topics={sorted(blocked_topics)}")
+        topics = topics - blocked_topics
     if not topics:
-        return True   # پست معمولی: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
+        return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
     targets = set()
     for uid, u in state.get("users", {}).items():
         if set(u.get("topics", [])) & topics:

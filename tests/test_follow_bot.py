@@ -138,7 +138,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.19")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.21")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -1918,6 +1918,158 @@ class FollowBotTest(unittest.TestCase):
 
     def test_send_button_help_mentions_button(self):
         self.assertIn("📤 ارسال خبر", fb.COMMAND_HELP["/send"])
+
+    # ---- 0.21: per-topic blocked words/emojis, one /block hub command ----
+    def test_blocked_hit_word(self):
+        self.assertEqual(fb._blocked_hit("🔴 قیمت طلا امروز بالا رفت", ["طلا"]), "طلا")
+        self.assertIsNone(fb._blocked_hit("🔴 قیمت سکه امروز بالا رفت", ["طلا"]))
+
+    def test_blocked_hit_phrase_ignores_zwnj_and_spaces(self):
+        self.assertEqual(fb._blocked_hit("🔴 قیمت‌طلا امروز بالا رفت", ["قیمت طلا"]), "قیمت طلا")
+        self.assertEqual(fb._blocked_hit("🔴 قیمت طلا امروز بالا رفت", ["قیمت‌طلا"]), "قیمت‌طلا")
+
+    def test_blocked_hit_emoji_anywhere(self):
+        self.assertEqual(fb._blocked_hit("🔴 خبر فوری 🚫 ادامه دارد", ["🚫"]), "🚫")
+        self.assertIsNone(fb._blocked_hit("🔴 خبر فوری ادامه دارد", ["🚫"]))
+
+    def test_blocked_hit_empty(self):
+        self.assertIsNone(fb._blocked_hit("🔴 خبر", []))
+        self.assertIsNone(fb._blocked_hit("", ["طلا"]))
+
+    def test_parse_block_args_longest_prefix(self):
+        self.assertEqual(fb._parse_block_args("/block طلا و دلار سکه", self.state),
+                         ("gold", ["سکه"]))
+        self.assertEqual(fb._parse_block_args("/block سیاسی موشکی", self.state),
+                         ("political", ["موشکی"]))
+        self.assertEqual(fb._parse_block_args("/block سیاسی", self.state),
+                         ("political", []))
+        self.assertEqual(fb._parse_block_args("/block موضوع‌ناموجود کلمه", self.state),
+                         (None, None))
+        self.assertEqual(fb._parse_block_args("/block", self.state), (None, None))
+
+    def test_block_direct_adds_to_that_topic_only(self):
+        self.send(ADMIN, "/block سیاسی موشکی 🚫")
+        self.assertEqual(self.state["topic_blocked"], {"political": ["موشکی", "🚫"]})
+        self.assertIn("ممنوع شد", self.last_text())
+        self.assertIn("سیاسی", self.last_text())
+        self.send(ADMIN, "/block سیاسی موشکی")
+        self.assertEqual(self.state["topic_blocked"], {"political": ["موشکی", "🚫"]})
+        self.assertIn("از قبل ممنوع بود", self.last_text())
+        self.send(ADMIN, "/block ورزشی فوتبال")
+        self.assertEqual(self.state["topic_blocked"],
+                         {"political": ["موشکی", "🚫"], "sport": ["فوتبال"]})
+
+    def test_block_direct_comma_phrases(self):
+        self.send(ADMIN, "/block طلا و دلار قیمت طلا، دلار آمریکا")
+        self.assertEqual(self.state["topic_blocked"], {"gold": ["قیمت طلا", "دلار آمریکا"]})
+
+    def test_block_direct_unknown_topic(self):
+        self.send(ADMIN, "/block موضوع‌ناموجود کلمه")
+        self.assertIn("چنین موضوعی نداریم", self.last_text())
+        self.assertEqual(self.state.get("topic_blocked", {}), {})
+
+    def test_block_no_args_opens_topic_picker(self):
+        self.send(ADMIN, "/block")
+        self.assertIn("کدوم موضوع", self.last_text())
+        self.send(ADMIN, "سیاسی")
+        self.assertIn("ممنوع برای", self.last_text())
+        self.assertIn("سیاسی", self.last_text())
+
+    def test_block_hub_add_flow(self):
+        self.send(ADMIN, "/block")
+        self.send(ADMIN, "سیاسی")
+        self.send(ADMIN, "➕ اضافه کردن ممنوع")
+        self.assertIn("بفرست", self.last_text())
+        self.send(ADMIN, "موشکی 🚫")
+        self.assertEqual(self.state["topic_blocked"], {"political": ["موشکی", "🚫"]})
+        self.assertIn("ممنوع شد", self.last_text())
+
+    def test_block_hub_remove_flow(self):
+        self.send(ADMIN, "/block سیاسی موشکی 🚫 دلار")
+        self.send(ADMIN, "/block سیاسی")
+        self.send(ADMIN, "➖ حذف کردن ممنوع")
+        self.assertIn("حذف کنم", self.last_text())
+        self.send(ADMIN, "🚫")
+        self.assertEqual(self.state["topic_blocked"], {"political": ["موشکی", "دلار"]})
+        self.assertIn("حذف شد", self.last_text())
+        # تایپِ موردی که نیست، دوباره می‌پرسه
+        self.send(ADMIN, "➖ حذف کردن ممنوع")
+        self.send(ADMIN, "سکه")
+        self.assertIn("توی ممنوع‌ها نیست", self.last_text())
+        self.assertEqual(self.state["topic_blocked"], {"political": ["موشکی", "دلار"]})
+
+    def test_block_hub_remove_empty(self):
+        self.send(ADMIN, "/block سیاسی")
+        self.send(ADMIN, "➖ حذف کردن ممنوع")
+        self.assertIn("چیزی ممنوع نیست", self.last_text())
+
+    def test_block_button_opens_picker_for_admin(self):
+        self.send(ADMIN, "🚫 کلمات ممنوع")
+        self.assertIn("کدوم موضوع", self.last_text())
+        texts = [b["text"] for row in fb.main_keyboard(ADMIN, self.state)["keyboard"] for b in row]
+        self.assertIn("🚫 کلمات ممنوع", texts)
+        # دکمه‌ی ممنوع‌ها قبل از راهنماست
+        self.assertLess(texts.index("🚫 کلمات ممنوع"), texts.index("❓ راهنما"))
+        texts = [b["text"] for row in fb.main_keyboard(USER_A, self.state)["keyboard"] for b in row]
+        self.assertNotIn("🚫 کلمات ممنوع", texts)
+
+    def test_block_admin_only(self):
+        self.send(USER_A, "/block")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+        self.send(USER_A, "/block سیاسی موشکی")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+        self.assertEqual(self.state.get("topic_blocked", {}), {})
+
+    def test_blocked_topic_only_post_not_forwarded_to_it(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow ورزشی")
+        self.send(ADMIN, "/block سیاسی موشکی")
+        # پست دو موضوعی: برای سیاسی ممنوع، برای ورزشی می‌رسه
+        fb.handle_channel_post(self.state, make_channel_post(
+            900, "🔴 فوری: حمله موشکی؛ تیم فوتبال پرسپولیس به فینال رفت"))
+        self.assertEqual(self.fake.forwarded, [(USER_B, 900)])
+        self.assertIn(900, self.state["seen_posts"])
+        # پست بعدی بدون کلمه‌ی ممنوع به هر دو می‌رسه
+        fb.handle_channel_post(self.state, make_channel_post(
+            901, "🔴 فوری: حمله جدید؛ تیم فوتبال پرسپولیس به فینال رفت"))
+        self.assertEqual(self.fake.forwarded, [(USER_B, 900), (USER_A, 901), (USER_B, 901)])
+
+    def test_blocked_emoji_per_topic(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(ADMIN, "/block سیاسی 🚫")
+        fb.handle_channel_post(self.state, make_channel_post(902, "🔴 فوری: خبر مهم 🚫"))
+        self.assertEqual(self.fake.forwarded, [])
+        fb.handle_channel_post(self.state, make_channel_post(903, "🔴 فوری: خبر مهم"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 903)])
+
+    def test_blocked_post_counts_only_forwarded_topics(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow ورزشی")
+        self.send(ADMIN, "/block سیاسی موشکی")
+        fb.handle_channel_post(self.state, make_channel_post(
+            904, "🔴 فوری: حمله موشکی؛ تیم فوتبال پرسپولیس به فینال رفت"))
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {"sport": 1})
+
+    def test_blocked_then_removed_forwards_again(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(ADMIN, "/block سیاسی موشکی")
+        self.send(ADMIN, "/block سیاسی")
+        self.send(ADMIN, "➖ حذف کردن ممنوع")
+        self.send(ADMIN, "موشکی")
+        fb.handle_channel_post(self.state, make_channel_post(905, "🔴 فوری: حمله موشکی جدید"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 905)])
+
+    def test_no_unblock_or_blocklist_commands(self):
+        # هر سه کار توی یه دستور /blockه؛ دستورهای جدا نباید وجود داشته باشن
+        self.assertNotIn("/unblock", fb.COMMAND_HELP)
+        self.assertNotIn("/blocklist", fb.COMMAND_HELP)
+        self.assertIn("/block", fb.COMMAND_HELP)
+
+    def test_help_block_admin_only(self):
+        self.send(ADMIN, "/help /block")
+        self.assertIn("/block", self.last_text())
+        self.send(USER_A, "/help /block")
+        self.assertNotIn("ممنوع", self.last_text())
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
