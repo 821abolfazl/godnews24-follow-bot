@@ -25,10 +25,11 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.17"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-16-0.18"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -422,26 +423,18 @@ def topic_label(state, key):
 
 
 # ====== دسته‌بندی پست کانال ======
-def leading_emoji(text):
-    """ایموجی اول متن پست (همون ایموجی‌ای که ربات اصلی اول خبر می‌ذاره)."""
-    t = (text or "").lstrip()
-    for e in ("🔴", "🚨", "🔥", "⚽", "🟡"):
-        if t.startswith(e):
-            return e
-    return ""
-
-
 def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
                   removed_keywords=None):
     """موضوع‌های یه پست کانال رو برمی‌گردونه (مجموعه‌ای از کلیدهای موضوع).
     فقط پست‌های مهم/موضوع‌دار برمی‌گردن؛ پست معمولی (🔵) هیچ موضوعی نمی‌گیره.
     موضوع‌های سفارشی با کلمه‌های کلیدی‌شون توی همون تیتر + اول متن چک می‌شن.
+    نسخه‌ی ۰.۱۸: ایموجی موضوع (🔴 🚨 🔥 ⚽ 🟡) هر جای تیتر + اول متن باشه
+    کافیه — لازم نیست اولِ پست باشه.
     extra_keywords: کلمه‌های اضافه‌ای که ادمین برای موضوع‌های اصلی گذاشته؛
     disabled: موضوع‌های اصلی حذف‌شده که اصلاً تشخیص داده نمی‌شن؛
     removed_keywords: کلمه‌های داخلی حذف‌شده‌ی موضوع‌های اصلی."""
     t = text or ""
     head = t[:600]   # تیتر + اول متن، برای کلمه‌های کلیدی کافیه
-    lead = leading_emoji(t)
     out = set()
     dis = set(disabled or [])
     extra = extra_keywords or {}
@@ -452,15 +445,15 @@ def classify_post(text, custom_topics=None, extra_keywords=None, disabled=None,
         return [k for k in base if k not in rem]
 
     if "political" not in dis and (
-            lead in ("🔴", "🚨", "🔥") or any(k in head for k in eff(POLITICS_KW, "political"))
+            any(e in head for e in ("🔴", "🚨", "🔥")) or any(k in head for k in eff(POLITICS_KW, "political"))
             or any(k in head for k in eff(FLASH_KW, "political"))
             or any(kw and kw in head for kw in extra.get("political", []))):
         out.add("political")
     if "sport" not in dis and (
-            lead == "⚽" or any(k in head for k in eff(SPORT_KW, "sport"))
+            "⚽" in head or any(k in head for k in eff(SPORT_KW, "sport"))
             or any(kw and kw in head for kw in extra.get("sport", []))):
         out.add("sport")
-    if "gold" not in dis and lead == "🟡" and (
+    if "gold" not in dis and "🟡" in head and (
             any(k in head for k in eff(GOLD_KW, "gold"))
             or any(kw and kw in head for kw in extra.get("gold", []))):
         out.add("gold")
@@ -844,7 +837,7 @@ def _keywords_text(state, key=None):
             if removed:
                 lines.append("➖ حذف‌شده: " + "، ".join(removed))
         lines.append("")
-    lines.append("موضوع‌های اصلی با ایموجی اول پست (🔴 ⚽ 🟡) هم تشخیص داده می‌شن.")
+    lines.append("موضوع‌های اصلی با ایموجی‌شون (🔴 ⚽ 🟡) هر جای پست هم تشخیص داده می‌شن.")
     lines.append("برای حذف یه کلمه: /removekeyword")
     return "\n".join(lines).rstrip()
 
@@ -1088,6 +1081,7 @@ def _send_followers(state, chat_id):
         tstr = "، ".join(topic_label(state, k) for k in ts)
         listed.append((name.lower(), f"• {who} — {tstr}"))
     lines = "\n".join(f"{topic_label(state, k)}: {counts[k]}" for k in keys)
+    _reset_forward_counts_if_new_day(state)
     fcounts = state.get("topic_forward_counts", {}) or {}
     flines = "\n".join(f"{topic_label(state, k)}: {fcounts.get(k, 0)}" for k in keys)
     out = (f"دنبال‌کننده‌ها (کل: {total} نفر):\n{lines}\n\n"
@@ -1743,6 +1737,20 @@ def handle_message(state, msg):
 
 
 # ====== پست‌های کانال ======
+def _today_tehran():
+    """تاریخ امروز به وقت تهران (برای صفر شدن روزانه‌ی آمار ارسال)."""
+    return (datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d")
+
+
+def _reset_forward_counts_if_new_day(state):
+    """اگه روز عوض شده باشه، آمار ارسالِ موضوع‌ها صفر می‌شه؛ از صبح، با شروع
+    خبرهای کانال، شمارش از اول شروع می‌شه (نسخه‌ی ۰.۱۸)."""
+    today = _today_tehran()
+    if state.get("topic_forward_day") != today:
+        state["topic_forward_counts"] = {}
+        state["topic_forward_day"] = today
+
+
 def handle_channel_post(state, post):
     """یه پست کانال رو دسته‌بندی می‌کنه و برای دنبال‌کننده‌های موضوعش فوروارد می‌کنه.
     True یعنی حافظه تغییر کرده. آیدی دنبال‌کننده‌ها هیچ‌وقت لاگ نمی‌شه."""
@@ -1779,6 +1787,7 @@ def handle_channel_post(state, post):
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
     if sent_uids:
         # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
+        _reset_forward_counts_if_new_day(state)
         counts = state.setdefault("topic_forward_counts", {})
         users = state.get("users", {})
         for t in topics:
