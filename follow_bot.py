@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-16-0.27"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-18-0.28"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -2264,12 +2264,14 @@ def handle_channel_post(state, post):
         for t in topics:
             if any(t in (users.get(uid) or {}).get("topics", []) for uid in sent_uids):
                 counts[t] = counts.get(t, 0) + 1
-        # نسخه‌ی ۰.۲۶: فورواردِ کلمه‌ی دلخواه — فقط کسایی که خبر رو فقط به‌خاطر
-        # کلمه‌شون گرفتن (نه از راه موضوع)؛ اگه هم موضوع و هم کلمه هم‌زمان بود،
-        # اون فوروارد برای موضوع شمرده می‌شه، نه برای کلمه.
+        # نسخه‌ی ۰.۲۸: فورواردِ کلمه‌ی دلخواه — مثل موضوع‌ها، به‌ازای هر خبر یکی
+        # شمرده می‌شه، نه به‌ازای هر نفر؛ وگرنه یه خبر که به چند نفرِ کلمه‌ای
+        # برسه چند بار شمرده می‌شد. فقط کسایی که خبر رو فقط به‌خاطر کلمه‌شون
+        # گرفتن (نه از راه موضوع)؛ اگه هم موضوع و هم کلمه هم‌زمان بود، اون
+        # فوروارد برای موضوع شمرده می‌شه، نه برای کلمه.
         kw_sent = sent_uids - topic_targets
         if kw_sent:
-            state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + len(kw_sent)
+            state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + 1
     print(f"forwarded post {post_id} topics={sorted(topics)} to {sent} follower(s)")
     return True
 

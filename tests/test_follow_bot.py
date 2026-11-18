@@ -139,7 +139,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-16-0.27")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-18-0.28")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2351,6 +2351,28 @@ class FollowBotTest(unittest.TestCase):
     def test_help_topics_detail_mentions_keywords(self):
         self.send(USER_A, "/help /topics")
         self.assertIn("کلمه‌های دلخواهت", self.last_text())
+
+    # ---- 0.28: شمارش کلمه‌ی دلخواه به‌ازای هر خبر (نه هر نفر) + اجراها پشت سر هم ----
+    def test_keyword_forward_count_counts_post_once_for_many_users(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "پرسپولیس")
+        self.send(USER_B, "📌 انتخاب موضوع")
+        self.send(USER_B, "🔍 کلمه‌های من")
+        self.send(USER_B, "➕ اضافه کردن کلمه")
+        self.send(USER_B, "پرسپولیس")
+        fb.handle_channel_post(self.state, make_channel_post(970, "⚽ پرسپولیس قهرمان شد"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 970), (USER_B, 970)])
+        # یه خبر، دو گیرنده‌ی کلمه‌ای — شمارنده فقط یکی بالا می‌ره (مثل موضوع‌ها)
+        self.assertEqual(self.state.get("keyword_forward_count"), 1)
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {})
+
+    def test_workflow_runs_serialize_instead_of_cancelling(self):
+        path = os.path.join(os.path.dirname(__file__), "..", ".github",
+                            "workflows", "follow.yml")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("cancel-in-progress: false", text)
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
