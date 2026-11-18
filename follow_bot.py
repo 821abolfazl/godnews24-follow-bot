@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.30"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.31"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -2541,20 +2541,31 @@ def process_updates(state):
     for u in updates:
         state["tg_offset"] = u["update_id"] + 1
         changed = True
-        if "message" in u:
-            if handle_message(state, u["message"]):
-                changed = True
-        elif "channel_post" in u:
-            if handle_channel_post(state, u["channel_post"]):
-                changed = True
+        try:
+            if "message" in u:
+                if handle_message(state, u["message"]):
+                    changed = True
+            elif "channel_post" in u:
+                if handle_channel_post(state, u["channel_post"]):
+                    changed = True
+        except Exception as ex:
+            # نسخه‌ی ۰.۳۱: یه پیام/پست خراب نباید کل صف رو قفل کنه — رد می‌شه
+            # و بقیه پردازش می‌شن. قبلاً استثنا کل دور رو می‌انداخت و چون
+            # حافظه ذخیره نمی‌شد، همون پیام تا ابد دوباره امتحان می‌شد.
+            print(f"update {u.get('update_id')} رد شد:", repr(ex))
     return changed
 
 
 def run_once():
     state = load_state()
     changed = process_updates(state)
-    if _sweep_followers(state):
-        changed = True
+    try:
+        if _sweep_followers(state):
+            changed = True
+    except Exception as ex:
+        # نسخه‌ی ۰.۳۱: خطای جاروی روزانه نباید ذخیره‌ی حافظه رو بگیرد —
+        # وگرنه دور بعد همون پیام‌ها دوباره پردازش می‌شن (تکراری).
+        print("sweep رد شد:", repr(ex))
     if changed:
         save_state(state)
     return state
@@ -2623,6 +2634,12 @@ def dispatch_next():
 
 
 def main():
+    try:
+        # نسخه‌ی ۰.۳۱: خروجی خط‌به‌خط نوشته بشه تا لاگِ اجرای زنده
+        # همان‌موقع دیده بشه، نه فقط موقع تمام شدن اجرا (بافر پایتون).
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     print(f"نسخه‌ی ربات دنبال‌کننده: {BOT_VERSION}")
     if not TOKEN:
         print("FOLLOW_BOT_TOKEN is not set — refusing to run (state must never be plaintext)")

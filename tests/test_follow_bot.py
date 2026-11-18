@@ -145,7 +145,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.30")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.31")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2649,6 +2649,60 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("دو ساعت اخیر", self.last_text())
         self.send(ADMIN, "/help")
         self.assertIn("/recent", self.last_text())
+
+    # ---- 0.31: یه پیام/پست خراب نباید کل صف رو قفل کنه ----
+    def test_poison_message_skipped_rest_processed(self):
+        # ارسال برای USER_A خطا می‌ده (مثل قطعی تلگرام وسط ارسال)
+        self.fake.send_failures = {USER_A: "raise"}
+        self.fake.updates = [
+            {"update_id": 10, "message": make_message(USER_A, "/start")},
+            {"update_id": 11, "message": make_message(USER_B, "/start")},
+        ]
+        fb.process_updates(self.state)
+        # پیام دوم با وجود خرابی اولی جواب گرفته
+        self.assertEqual(self.fake.sent[-1][0], USER_B)
+        self.assertIn("GodNews24", self.fake.sent[-1][1])
+        # آفست از هر دو رد شده — پیام خراب دوباره امتحان نمی‌شه
+        self.assertEqual(self.state["tg_offset"], 12)
+
+    def test_poison_channel_post_skipped_rest_forwarded(self):
+        self.send(USER_A, "/follow ورزشی")
+        orig = fb.handle_channel_post
+
+        def boom(state, post):
+            if post.get("message_id") == 900:
+                raise RuntimeError("boom")
+            return orig(state, post)
+
+        fb.handle_channel_post = boom
+        try:
+            self.fake.updates = [
+                {"update_id": 20, "channel_post": make_channel_post(
+                    900, "🔴 خبر خراب")},
+                {"update_id": 21, "channel_post": make_channel_post(
+                    901, "⚽ پرسپولیس قهرمان لیگ شد")},
+            ]
+            fb.process_updates(self.state)
+        finally:
+            fb.handle_channel_post = orig
+        self.assertEqual(self.fake.forwarded, [(USER_A, 901)])
+        self.assertEqual(self.state["tg_offset"], 22)
+
+    def test_run_once_saves_state_when_sweep_raises(self):
+        self.fake.updates = [
+            {"update_id": 30, "message": make_message(USER_A, "/start")},
+        ]
+        orig = fb._sweep_followers
+        fb._sweep_followers = lambda state: (_ for _ in ()).throw(
+            RuntimeError("sweep down"))
+        try:
+            fb.run_once()  # نباید خطا بده
+        finally:
+            fb._sweep_followers = orig
+        # پیام پردازش و حافظه ذخیره شده — دور بعد تکراری نمی‌شه
+        self.assertEqual(self.fake.sent[-1][0], USER_A)
+        saved = fb.load_state()
+        self.assertEqual(saved.get("tg_offset"), 31)
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
