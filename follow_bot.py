@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-18-0.28"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-18-0.29"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -112,7 +112,7 @@ def load_state():
     """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
     state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
              "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {},
-             "sent_messages": {}}
+             "sent_messages": {}, "recent_forwards": []}
     if not os.path.exists(STATE_FILE):
         return state
     with open(STATE_FILE, encoding="utf-8") as f:
@@ -134,6 +134,7 @@ def save_state(state):
     state["seen_posts"] = state.get("seen_posts", [])[-500:]
     for lst in state.get("sent_messages", {}).values():
         del lst[:-SENT_MESSAGES_CAP]
+    _prune_recent_forwards(state)
     plain = json.dumps(state, ensure_ascii=False).encode("utf-8")
     token = _fernet().encrypt(plain).decode("ascii")
     with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -211,6 +212,56 @@ def _record_sent(state, chat_id, message_id):
     del lst[:-SENT_MESSAGES_CAP]
 
 
+# ====== خبرهای اخیر (نسخه‌ی ۰.۲۹: /recent) ======
+RECENT_WINDOW_SECONDS = 2 * 3600  # /recent فقط خبرهای دو ساعت اخیر رو نشون می‌ده
+RECENT_KEEP_SECONDS = 3 * 3600    # رکوردها تا سه ساعت نگه داشته می‌شن، بعد خودکار پاک می‌شن
+RECENT_MAX_ENTRIES = 50         # سقف تعداد رکوردها؛ بیشتر از این، قدیمی‌ترین‌ها حذف می‌شن
+
+
+def _prune_recent_forwards(state, now=None):
+    """رکوردهای فورواردِ قدیمی‌تر از دو ساعت رو حذف می‌کنه تا حافظه سنگین نشه."""
+    now = time.time() if now is None else now
+    recs = state.get("recent_forwards") or []
+    state["recent_forwards"] = [r for r in recs
+                                if now - float(r.get("ts") or 0) <= RECENT_KEEP_SECONDS][-RECENT_MAX_ENTRIES:]
+    return state["recent_forwards"]
+
+
+def _recent_title(text):
+    """خط اول متن خبر، کوتاه‌شده برای لیست /recent."""
+    first = (text or "").strip().split("\n")[0].strip()
+    if not first:
+        return "خبر بدون متن"
+    return first if len(first) <= 80 else first[:77] + "…"
+
+
+def _record_recent_forward(state, post_id, title, targets):
+    """یه خبر فورواردشده رو با گیرنده‌هاش ثبت می‌کنه تا /recent بتونه نشونش بده
+    و حذفش کنه. targets: {chat_id: forwarded_message_id}."""
+    if not targets:
+        return
+    _prune_recent_forwards(state)
+    recs = state.setdefault("recent_forwards", [])
+    recs.append({"post_id": post_id, "ts": time.time(), "title": title,
+                 "targets": {str(uid): mid for uid, mid in targets.items()}})
+    del recs[:-RECENT_MAX_ENTRIES]
+
+
+def _recent_forwards(state, now=None):
+    """خبرهای فورواردشده‌ی دو ساعت اخیر، از تازه‌ترین به قدیمی‌ترین."""
+    now = time.time() if now is None else now
+    return sorted([r for r in (state.get("recent_forwards") or [])
+                   if now - float(r.get("ts") or 0) <= RECENT_WINDOW_SECONDS],
+                  key=lambda r: float(r.get("ts") or 0), reverse=True)
+
+
+def _parse_fa_number(text):
+    """عدد فارسی/عربی/لاتین رو به int تبدیل می‌کنه؛ اگه عدد نباشه None."""
+    t = (text or "").strip().translate(
+        str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "0123456789" * 2))
+    return int(t) if t.isdigit() else None
+
+
 # ====== عضویت کانال (دروازه‌ی ربات) ======
 JOIN_TEXT = "برای استفاده از ربات خبری، اول باید عضو کانال GodNews24 بشی 🙂"
 
@@ -281,6 +332,7 @@ ADMIN_BUTTONS = [
     [{"text": "🔧 تغییرات موضوع"}],
     [{"text": "🔑 کلمه‌های کلیدی"}],
     [{"text": "🚫 کلمات ممنوع"}],
+    [{"text": "🕐 خبرهای ساعت اخیر"}],
 ]
 
 # کیبورد موقع قدم‌های جادوگر (فقط لغو)
@@ -752,6 +804,8 @@ ADMIN_HELP_TEXT = (
     "/block — کلمه یا ایموجی ممنوع برای یه موضوع: /block یا /block <موضوع> <کلمه> ...؛ پستی که یکی از این‌ها رو داشته باشه برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه، ولی موضوع‌های دیگه همون پست رو می‌گیرن (دکمه‌ی «🚫 کلمات ممنوع»)\n\n"
     "📣 پیام به اعضا\n"
     "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن («👥 به همه» یا یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n\n"
+    "🕐 خبرهای ساعت اخیر\n"
+    "/recent — خبرهایی که در دو ساعت اخیر برای دنبال‌کننده‌ها رفته (دکمه‌ی «🕐 خبرهای ساعت اخیر»)؛ از همون‌جا می‌تونی یه خبر رو از چت همه‌ی گیرنده‌هاش پاک کنی\n\n"
     "📜 تنظیمات\n"
     "/rules — تنظیمات فعلی ربات: موضوع‌ها، کلمه‌های کلیدی و کلمه/ایموجی‌های ممنوع هر موضوع (دکمه‌ی «📜 قوانین»)\n\n"
     "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
@@ -826,6 +880,10 @@ COMMAND_HELP = {
                    "• با دکمه‌ی «📣 پیام به اعضا»: اول گیرنده رو انتخاب کن («👥 به همه» یا یه موضوع)، بعد متن رو بفرست\n"
                    "• مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)؛ مثلاً /broadcast 🔴 سیاسی سلام\n"
                    "• برای موضوع سفارشی اولش اسم کاملش رو بنویس (مثلاً 🚨 جنگ)"),
+    "/recent": ("خبرهای دو ساعت اخیر:\n\n"
+                "خبرهایی که در دو ساعت اخیر برای دنبال‌کننده‌ها فوروارد شده رو با تیتر، زمان و تعداد گیرنده‌ها نشون می‌ده.\n\n"
+                "• بنویس /recent یا دکمه‌ی «🕐 خبرهای ساعت اخیر» رو بزن، بعد شماره‌ی خبر رو بفرست تا از چت همه‌ی گیرنده‌هاش پاک بشه\n"
+                "• فقط خبرهایی که بعد از نصب این نسخه رفته باشن قابل حذف‌اند؛ رکوردها بعد از حدود سه ساعت خودکار پاک می‌شن"),
     "/block": ("کلمه‌ها و ایموجی‌های ممنوع برای هر موضوع جدا:\n\n"
                "اگه پستی یه کلمه یا ایموجی ممنوعِ اون موضوع رو داشته باشه، برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه؛ موضوع‌های دیگه همون پست رو می‌گیرن.\n\n"
                "• بنویس /block و موضوع رو انتخاب کن؛ بعد با دکمه‌ها اضافه یا حذف کن\n"
@@ -1277,6 +1335,69 @@ def _rename_topic(state, key, new):
     return _rename_custom_topic(state, key, new)
 
 
+def _recent_text(state):
+    """متن لیست خبرهای دو ساعت اخیر برای ادمین."""
+    recs = _recent_forwards(state)
+    if not recs:
+        return "در دو ساعت اخیر خبری برای دنبال‌کننده‌ها نرفته 🙂"
+    now = time.time()
+    lines = ["خبرهای دو ساعت اخیر:"]
+    for i, r in enumerate(recs, 1):
+        mins = max(0, int((now - float(r.get("ts") or 0)) // 60))
+        n = len(r.get("targets") or {})
+        lines.append(f"{_fa_digits(i)}. {r.get('title') or 'خبر بدون متن'} — "
+                     f"{_fa_digits(mins)} دقیقه پیش، {_fa_digits(n)} نفر")
+    lines.append("\nبرای حذف یک خبر، شماره‌ش رو بفرست (مثلاً ۱).")
+    return "\n".join(lines)
+
+
+def _recent_keyboard(state):
+    """دکمه‌های حذف برای خبرهای دو ساعت اخیر + لغو (دو تا در هر ردیف)."""
+    recs = _recent_forwards(state)
+    rows = []
+    for i in range(0, len(recs), 2):
+        rows.append([{"text": f"🗑 حذف {_fa_digits(j)}"}
+                     for j in range(i + 1, min(i + 3, len(recs) + 1))])
+    rows.append([{"text": "❌ لغو"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+
+def _send_recent(state, chat_id):
+    """لیست خبرهای دو ساعت اخیر رو برای ادمین می‌فرسته (فقط ادمین)."""
+    if chat_id != ADMIN_CHAT_ID:
+        send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+        return True
+    recs = _recent_forwards(state)
+    if not recs:
+        send_message(chat_id, _recent_text(state), reply_markup=main_keyboard(chat_id, state))
+        return True
+    state.setdefault("pending", {})[chat_id] = {"cmd": "/recent", "step": "pick", "ts": time.time()}
+    send_message(chat_id, _recent_text(state), reply_markup=_recent_keyboard(state))
+    return True
+
+
+def _delete_recent(state, index):
+    """یه خبر از رکوردهای اخیر رو از چت همه‌ی گیرنده‌هاش پاک می‌کنه؛
+    برمی‌گردونه (تعداد پاک‌شده، تعداد ناموفق، تیتر)؛ اگه شماره معتبر نباشه None."""
+    recs = _recent_forwards(state)
+    if index < 1 or index > len(recs):
+        return None
+    rec = recs[index - 1]
+    deleted = failed = 0
+    for uid, mid in (rec.get("targets") or {}).items():
+        try:
+            res = api("deleteMessage", chat_id=uid, message_id=mid)
+        except Exception:
+            res = None
+        if res is None:
+            failed += 1
+        else:
+            deleted += 1
+        time.sleep(0.05)
+    state["recent_forwards"] = [r for r in (state.get("recent_forwards") or []) if r is not rec]
+    return deleted, failed, rec.get("title") or "خبر بدون متن"
+
+
 def _send_followers(state, chat_id):
     """آمار + لیست دنبال‌کننده‌ها رو برای ادمین می‌فرسته (فقط ادمین)."""
     if chat_id != ADMIN_CHAT_ID:
@@ -1456,6 +1577,8 @@ def handle_message(state, msg):
         return _send_followers(state, chat_id)
     if text == "👥 دنبال‌کننده‌ها":
         return _send_followers(state, chat_id)
+    if text == "/recent" or text == "🕐 خبرهای ساعت اخیر":
+        return _send_recent(state, chat_id)
     if text == "📣 پیام به اعضا":
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -1796,6 +1919,34 @@ def handle_message(state, msg):
         # جوابِ دستوری که منتظر آرگومان بود (/follow، /unfollow، /broadcast یا /send)
         cmd = entry["cmd"]
         pending.pop(chat_id, None)
+        if cmd == "/recent":
+            # انتخاب خبر برای حذف: دکمه‌ی «🗑 حذف N» یا فقط عدد (فارسی یا لاتین)
+            if not _recent_forwards(state):
+                send_message(chat_id, "دیگه خبری توی دو ساعت اخیر نیست 🙂",
+                             reply_markup=main_keyboard(chat_id, state))
+                return True
+            if text.startswith("🗑 حذف "):
+                num = _parse_fa_number(text[len("🗑 حذف "):])
+            else:
+                num = _parse_fa_number(text)
+            if num is None:
+                send_message(chat_id, "شماره‌ی خبر رو بفرست (مثلاً ۱) یا «❌ لغو» رو بزن:",
+                             reply_markup=_recent_keyboard(state))
+                pending[chat_id] = entry
+                return True
+            res = _delete_recent(state, num)
+            if res is None:
+                send_message(chat_id, "چنین خبری توی دو ساعت اخیر نیست؛ از لیست یکی رو انتخاب کن:",
+                             reply_markup=_recent_keyboard(state))
+                pending[chat_id] = entry
+                return True
+            deleted, failed, title = res
+            out = f"✅ «{title}» از چت {_fa_digits(deleted)} نفر پاک شد."
+            if failed:
+                out += (f"\n⚠️ برای {_fa_digits(failed)} نفر پاک نشد "
+                        "(بلاک کرده یا خودشون پاک کرده بودن).")
+            send_message(chat_id, out, reply_markup=main_keyboard(chat_id, state))
+            return True
         if cmd == "/block":
             if entry.get("step") == "topic":
                 key = _norm_topic(text, state.get("custom_topics", {}), state.get("topic_labels", {}))
@@ -2249,14 +2400,17 @@ def handle_channel_post(state, post):
         return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
     sent = 0
     sent_uids = set()
+    forwarded = {}
     for uid in sorted(targets):
         res = forward_to(uid, post_id)
         if res:
             sent += 1
             sent_uids.add(uid)
             _record_sent(state, uid, res.get("message_id"))
+            forwarded[uid] = res.get("message_id")
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
     if sent_uids:
+        _record_recent_forward(state, post_id, _recent_title(text), forwarded)
         # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
         _reset_forward_counts_if_new_day(state)
         counts = state.setdefault("topic_forward_counts", {})

@@ -139,7 +139,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-18-0.28")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-18-0.29")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2373,6 +2373,140 @@ class FollowBotTest(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             text = f.read()
         self.assertIn("cancel-in-progress: false", text)
+
+    # ---- 0.29: /recent — خبرهای دو ساعت اخیر + حذف برای گیرنده‌ها ----
+    def _follow_and_post(self, mid=790, text="🔴 خبر مهم سیاسی"):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow ورزشی")
+        fb.handle_channel_post(self.state, make_channel_post(mid, text))
+        return self.state.get("recent_forwards", [])
+
+    def test_recent_records_forwarded_post_with_targets(self):
+        recs = self._follow_and_post()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["post_id"], 790)
+        self.assertIn("خبر مهم سیاسی", recs[0]["title"])
+        # فقط دنبال‌کننده‌ی سیاسی خبر رو گرفته، نه ورزشی
+        self.assertEqual(set(recs[0]["targets"]), {USER_A})
+        self.assertIsInstance(list(recs[0]["targets"].values())[0], int)
+        # خبر ورزشی جداگانه ثبت می‌شه
+        fb.handle_channel_post(self.state, make_channel_post(791, "⚽ پرسپولیس قهرمان شد"))
+        self.assertEqual(len(self.state["recent_forwards"]), 2)
+        self.assertEqual(set(self.state["recent_forwards"][1]["targets"]), {USER_B})
+
+    def test_recent_lists_only_last_two_hours(self):
+        now = time.time()
+        self.state["recent_forwards"] = [
+            {"post_id": 800, "ts": now - 3 * 3600, "title": "خبر خیلی قدیمی",
+             "targets": {USER_A: 5}},
+            {"post_id": 801, "ts": now - 3700, "title": "خبر یک ساعت پیش",
+             "targets": {USER_A: 6}},
+            {"post_id": 802, "ts": now - 60, "title": "خبر تازه",
+             "targets": {USER_A: 7}},
+        ]
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual([r["post_id"] for r in recs], [802, 801])
+        txt = fb._recent_text(self.state)
+        self.assertIn("خبر تازه", txt)
+        self.assertIn("خبر یک ساعت پیش", txt)
+        self.assertNotIn("خبر خیلی قدیمی", txt)
+        self.assertIn("۱ نفر", txt)
+
+    def test_recent_admin_only(self):
+        self.send(USER_A, "/recent")
+        self.assertIn("این دستور فقط برای ادمینه", self.last_text())
+        self.send(USER_A, "🕐 خبرهای ساعت اخیر")
+        self.assertIn("این دستور فقط برای ادمینه", self.last_text())
+
+    def test_recent_empty_for_admin(self):
+        self.send(ADMIN, "/recent")
+        self.assertIn("در دو ساعت اخیر خبری", self.last_text())
+        self.assertNotIn("/recent", self.state.get("pending", {}))
+
+    def test_recent_delete_flow_by_number(self):
+        self._follow_and_post()
+        targets = dict(self.state["recent_forwards"][0]["targets"])
+        self.send(ADMIN, "/recent")
+        self.assertIn("خبر مهم سیاسی", self.last_text())
+        self.assertIn("۱ نفر", self.last_text())
+        markup = json.loads(self.fake.sent[-1][2])
+        texts = [b["text"] for row in markup["keyboard"] for b in row]
+        self.assertIn("🗑 حذف ۱", texts)
+        self.send(ADMIN, "۱")
+        self.assertEqual(set(self.fake.deleted),
+                         {(uid, mid) for uid, mid in targets.items()})
+        self.assertIn("پاک شد", self.last_text())
+        self.assertEqual(self.state.get("recent_forwards"), [])
+
+    def test_recent_delete_by_button(self):
+        self._follow_and_post()
+        self.send(ADMIN, "🕐 خبرهای ساعت اخیر")
+        self.assertIn("خبر مهم سیاسی", self.last_text())
+        self.send(ADMIN, "🗑 حذف ۱")
+        self.assertEqual(len(self.fake.deleted), 1)
+        self.assertIn("پاک شد", self.last_text())
+
+    def test_recent_delete_counts_failures(self):
+        self._follow_and_post()
+        mid = list(self.state["recent_forwards"][0]["targets"].values())[0]
+        self.fake.delete_fail_ids.add(mid)
+        self.send(ADMIN, "/recent")
+        self.send(ADMIN, "۱")
+        self.assertIn("پاک نشد", self.last_text())
+        self.assertIn("۰ نفر پاک شد", self.last_text())
+
+    def test_recent_delete_invalid_number_then_cancel(self):
+        self._follow_and_post()
+        self.send(ADMIN, "/recent")
+        self.send(ADMIN, "۹۹")
+        self.assertIn("چنین خبری", self.last_text())
+        self.assertIn(ADMIN, self.state.get("pending", {}))
+        self.send(ADMIN, "❌ لغو")
+        self.assertIn("لغو شد", self.last_text())
+        self.assertNotIn(ADMIN, self.state.get("pending", {}))
+
+    def test_recent_prunes_old_records_on_save(self):
+        now = time.time()
+        self.state["recent_forwards"] = [
+            {"post_id": 800, "ts": now - 4 * 3600, "title": "خبر خیلی قدیمی",
+             "targets": {USER_A: 5}},
+            {"post_id": 801, "ts": now - int(2.5 * 3600), "title": "خبر دو ساعت و نیم پیش",
+             "targets": {USER_A: 6}},
+            {"post_id": 802, "ts": now, "title": "خبر تازه",
+             "targets": {USER_A: 7}},
+        ]
+        fb.save_state(self.state)
+        reloaded = fb.load_state()
+        # قدیمی‌تر از ۳ ساعت پاک می‌شه؛ دو ساعت و نیم پیش هنوز نگه داشته می‌شه
+        # (ولی توی لیست دو ساعته نیست)
+        self.assertEqual([r["post_id"] for r in reloaded["recent_forwards"]], [801, 802])
+        self.assertEqual([r["post_id"] for r in fb._recent_forwards(reloaded)], [802])
+
+    def test_recent_button_in_admin_keyboard_only(self):
+        self.send(ADMIN, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        texts = [b["text"] for row in markup["keyboard"] for b in row]
+        self.assertIn("🕐 خبرهای ساعت اخیر", texts)
+        self.send(USER_A, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        texts = [b["text"] for row in markup["keyboard"] for b in row]
+        self.assertNotIn("🕐 خبرهای ساعت اخیر", texts)
+
+    def test_recent_title_and_number_parsing(self):
+        self.assertEqual(fb._recent_title(""), "خبر بدون متن")
+        self.assertEqual(fb._recent_title("خط اول\nخط دوم"), "خط اول")
+        long = "خ" * 100
+        self.assertTrue(fb._recent_title(long).endswith("…"))
+        self.assertEqual(len(fb._recent_title(long)), 78)
+        self.assertEqual(fb._parse_fa_number("۱"), 1)
+        self.assertEqual(fb._parse_fa_number("12"), 12)
+        self.assertIsNone(fb._parse_fa_number("سلام"))
+
+    def test_recent_help_lists_command(self):
+        self.send(ADMIN, "/help /recent")
+        self.assertIn("دو ساعت اخیر", self.last_text())
+        self.send(ADMIN, "/help")
+        self.assertIn("/recent", self.last_text())
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
