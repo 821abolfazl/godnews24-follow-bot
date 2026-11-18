@@ -24,7 +24,10 @@ permissions:
 
 concurrency:
   group: godnews-follow-bot
-  cancel-in-progress: true
+  # نسخه‌ی ۰.۲۸: false یعنی اجرای تازه منتظر تموم شدن اجرای فعلی می‌مونه و
+    # لغوش نمی‌کنه؛ وگرنه اجرای تازه حافظه‌ی قدیمی رو می‌خوند و خبرهای بازه‌ی
+      # هم‌پوشانی رو دوباره فوروارد و دوباره می‌شمرد.
+    cancel-in-progress: false
 
 jobs:
   follow-bot:
