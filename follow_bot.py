@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-18-0.29"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.30"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -112,6 +112,7 @@ def load_state():
     """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
     state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
              "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {},
+             "forward_stats_week": [],
              "sent_messages": {}, "recent_forwards": []}
     if not os.path.exists(STATE_FILE):
         return state
@@ -333,6 +334,7 @@ ADMIN_BUTTONS = [
     [{"text": "🔑 کلمه‌های کلیدی"}],
     [{"text": "🚫 کلمات ممنوع"}],
     [{"text": "🕐 خبرهای ساعت اخیر"}],
+    [{"text": "📊 آمار هفته"}],
 ]
 
 # کیبورد موقع قدم‌های جادوگر (فقط لغو)
@@ -806,6 +808,8 @@ ADMIN_HELP_TEXT = (
     "/broadcast — پیام به دنبال‌کننده‌ها: اول گیرنده رو انتخاب کن («👥 به همه» یا یه موضوع)، بعد متن رو بفرست؛ یا مستقیم: /broadcast <متن> (به همه) یا /broadcast <ایموجی موضوع> <متن> (فقط همون موضوع)\n\n"
     "🕐 خبرهای ساعت اخیر\n"
     "/recent — خبرهایی که در دو ساعت اخیر برای دنبال‌کننده‌ها رفته (دکمه‌ی «🕐 خبرهای ساعت اخیر»)؛ از همون‌جا می‌تونی یه خبر رو از چت همه‌ی گیرنده‌هاش پاک کنی\n\n"
+    "📈 آمار هفته\n"
+    "/stats — آمار ارسالِ ۷ روز اخیر برای هر موضوع و کلمه‌ی دلخواه (دکمه‌ی «📊 آمار هفته»)؛ روز کانال با پست «شب بخیر» تموم می‌شه و آمار همون‌موقع بایگانی می‌شه\n\n"
     "📜 تنظیمات\n"
     "/rules — تنظیمات فعلی ربات: موضوع‌ها، کلمه‌های کلیدی و کلمه/ایموجی‌های ممنوع هر موضوع (دکمه‌ی «📜 قوانین»)\n\n"
     "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
@@ -884,6 +888,10 @@ COMMAND_HELP = {
                 "خبرهایی که در دو ساعت اخیر برای دنبال‌کننده‌ها فوروارد شده رو با تیتر، زمان و تعداد گیرنده‌ها نشون می‌ده.\n\n"
                 "• بنویس /recent یا دکمه‌ی «🕐 خبرهای ساعت اخیر» رو بزن، بعد شماره‌ی خبر رو بفرست تا از چت همه‌ی گیرنده‌هاش پاک بشه\n"
                 "• فقط خبرهایی که بعد از نصب این نسخه رفته باشن قابل حذف‌اند؛ رکوردها بعد از حدود سه ساعت خودکار پاک می‌شن"),
+    "/stats": ("آمار ۷ روز اخیر:\n\n"
+                "برای هر روز نشون می‌ده برای هر موضوع چندتا خبر فوروارد شده و چندتا خبر فقط به‌خاطر کلمه‌ی دلخواه رفته؛ "
+                "روز کانال با پست «شب بخیر» تموم می‌شه و آمار همون‌موقع بایگانی می‌شه، پس پست‌های بعد از نیمه‌شب و قبل از شب بخیر هنوز مال روز قبلی‌ان.\n\n"
+                "بنویس /stats یا دکمه‌ی «📊 آمار هفته» رو بزن."),
     "/block": ("کلمه‌ها و ایموجی‌های ممنوع برای هر موضوع جدا:\n\n"
                "اگه پستی یه کلمه یا ایموجی ممنوعِ اون موضوع رو داشته باشه، برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه؛ موضوع‌های دیگه همون پست رو می‌گیرن.\n\n"
                "• بنویس /block و موضوع رو انتخاب کن؛ بعد با دکمه‌ها اضافه یا حذف کن\n"
@@ -1427,7 +1435,7 @@ def _send_followers(state, chat_id):
         listed.append((name.lower(), f"{who} — {tstr}"))
     lines = "\n".join(f"{topic_label(state, k)}: {counts[k]}" for k in keys)
     lines += f"\n🔍 کلمه‌ی دلخواه: {kw_users} نفر"
-    _reset_forward_counts_if_new_day(state)
+    _roll_forward_day_if_stale(state)
     fcounts = state.get("topic_forward_counts", {}) or {}
     flines = "\n".join(f"{topic_label(state, k)}: {fcounts.get(k, 0)}" for k in keys)
     flines += f"\n🔍 کلمه‌ی دلخواه: {state.get('keyword_forward_count', 0)}"
@@ -1440,6 +1448,48 @@ def _send_followers(state, chat_id):
         if len(listed) > 30:
             out += f"\nو {len(listed) - 30} نفر دیگر"
     send_message(chat_id, out, reply_markup=main_keyboard(chat_id, state))
+    return True
+
+
+def _send_weekly_stats(state, chat_id):
+    """آمار ارسالِ ۷ روز اخیر رو برای ادمین می‌فرسته (فقط ادمین) — مثل /stats
+    ربات مدیریت. روز کانال با پست «شب بخیر» تموم می‌شه؛ پس آمار هر روز وقتی
+    بایگانی می‌شه که پست شب بخیرش رسیده باشه."""
+    if chat_id != ADMIN_CHAT_ID:
+        send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+        return True
+    _roll_forward_day_if_stale(state)
+    keys = active_topics(state) + list(state.get("custom_topics", {}))
+
+    def _day_line(day, counts, kw):
+        all_keys = list(dict.fromkeys(keys + list(counts or {})))
+        parts = [f"{topic_label(state, k)} {counts.get(k, 0)}"
+                 for k in all_keys if (counts or {}).get(k, 0)]
+        if kw:
+            parts.append(f"🔍 کلمه‌ی دلخواه {kw}")
+        return f"{day}: " + (" | ".join(parts) if parts else "—")
+
+    week = state.get("forward_stats_week", []) or []
+    lines = ["📈 آمار ۷ روز اخیر (شامل امروز):"]
+    for e in sorted(week, key=lambda x: x.get("day", "")):
+        lines.append(_day_line(e.get("day", ""), e.get("counts") or {}, e.get("keywords", 0)))
+    lines.append(_day_line(f"امروز ({_today_tehran()})",
+                           state.get("topic_forward_counts", {}) or {},
+                           state.get("keyword_forward_count", 0)))
+    tot = {}
+    tot_kw = 0
+    for e in list(week) + [{"counts": state.get("topic_forward_counts", {}) or {},
+                            "keywords": state.get("keyword_forward_count", 0)}]:
+        for k, v in (e.get("counts") or {}).items():
+            tot[k] = tot.get(k, 0) + v
+        tot_kw += e.get("keywords", 0)
+    tot_parts = [f"{topic_label(state, k)} {tot[k]}"
+                 for k in list(dict.fromkeys(keys + list(tot))) if tot.get(k, 0)]
+    if tot_kw:
+        tot_parts.append(f"🔍 کلمه‌ی دلخواه {tot_kw}")
+    if tot_parts:
+        lines.append("مجموع هفته: " + " | ".join(tot_parts))
+    send_message(chat_id, "\n".join(lines), reply_markup=main_keyboard(chat_id, state))
     return True
 
 
@@ -1579,6 +1629,8 @@ def handle_message(state, msg):
         return _send_followers(state, chat_id)
     if text == "/recent" or text == "🕐 خبرهای ساعت اخیر":
         return _send_recent(state, chat_id)
+    if text == "/stats" or text == "📊 آمار هفته":
+        return _send_weekly_stats(state, chat_id)
     if text == "📣 پیام به اعضا":
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -2349,14 +2401,63 @@ def _today_tehran():
     return (datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d")
 
 
-def _reset_forward_counts_if_new_day(state):
-    """اگه روز عوض شده باشه، آمار ارسالِ موضوع‌ها صفر می‌شه؛ از صبح، با شروع
-    خبرهای کانال، شمارش از اول شروع می‌شه (نسخه‌ی ۰.۱۸)."""
-    today = _today_tehran()
-    if state.get("topic_forward_day") != today:
-        state["topic_forward_counts"] = {}
-        state["keyword_forward_count"] = 0
-        state["topic_forward_day"] = today
+NIGHT_KEYS = ("شببخیر", "شبتونبخیر", "شبشمابخیر", "شبتانبخیر")
+
+
+def _is_night_post(text):
+    """پست «شب بخیر» کانال — آخرین پیام روز کانال. متن بلند خبری که فقط یه‌جا
+    این عبارت رو داره حساب نمی‌شه (مثل is_greeting_post ربات مدیریت)."""
+    key = re.sub(r"[\s\u200c_\-،,.!؟?؛:]+", "", text or "")
+    pos = [key.find(g) for g in NIGHT_KEYS if g in key]
+    if not pos:
+        return False
+    return len(key) < 400 or min(pos) < 80
+
+
+def _archive_forward_day(state):
+    """آمار ارسالِ روز جاری رو توی تاریخچه‌ی ۷ روزه می‌ذاره و شمارنده‌ها رو صفر
+    می‌کنه (مثل day_stats ربات مدیریت). اگه همون روز از قبل توی تاریخچه باشه
+    (پست شب بخیر دو بار اومده)، عددها با هم جمع می‌شن."""
+    day = state.get("topic_forward_day")
+    counts = dict(state.get("topic_forward_counts") or {})
+    kw = state.get("keyword_forward_count", 0)
+    if day:
+        week = state.setdefault("forward_stats_week", [])
+        for e in week:
+            if e.get("day") == day:
+                merged = dict(e.get("counts") or {})
+                for t, n in counts.items():
+                    merged[t] = merged.get(t, 0) + n
+                e["counts"] = merged
+                e["keywords"] = e.get("keywords", 0) + kw
+                break
+        else:
+            week.append({"day": day, "counts": counts, "keywords": kw})
+        by_day = {}
+        for e in week:
+            by_day[e.get("day")] = e
+        state["forward_stats_week"] = [by_day[k] for k in sorted(by_day)[-7:]]
+    state["topic_forward_counts"] = {}
+    state["keyword_forward_count"] = 0
+    state["topic_forward_day"] = _today_tehran()
+
+
+def _roll_forward_day_if_stale(state):
+    """اگه پست «شب بخیر» یه روز کامل دیده نشده (ربات مدیریت خاموش بوده یا پست
+    جا مونده)، آمار روزِ جاافتاده بایگانی و صفر می‌شه تا شمارنده‌ها بی‌نهایت
+    جمع نشن. پست‌های بعد از نیمه‌شب و قبل از شب بخیر هنوز مال روز قبلی‌ان و
+    ریست نمی‌شن — فقط وقتی یه روز کامل جا افتاده باشه."""
+    day = state.get("topic_forward_day")
+    if not day:
+        state["topic_forward_day"] = _today_tehran()
+        return
+    try:
+        d0 = datetime.strptime(day, "%Y-%m-%d").date()
+        d1 = datetime.strptime(_today_tehran(), "%Y-%m-%d").date()
+    except ValueError:
+        return
+    if (d1 - d0).days >= 2:
+        _archive_forward_day(state)
 
 
 def handle_channel_post(state, post):
@@ -2373,6 +2474,9 @@ def handle_channel_post(state, post):
     if post_id in seen:
         return False
     text = post.get("text") or post.get("caption") or ""
+    if _is_night_post(text):
+        # آخرین پیام روز کانال: آمار امروز بایگانی و صفر می‌شه (نسخه‌ی ۰.۳۰)
+        _archive_forward_day(state)
     topics = classify_post(text, state.get("custom_topics", {}),
                            state.get("topic_extra_keywords", {}),
                            state.get("disabled_topics", []),
@@ -2412,7 +2516,7 @@ def handle_channel_post(state, post):
     if sent_uids:
         _record_recent_forward(state, post_id, _recent_title(text), forwarded)
         # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
-        _reset_forward_counts_if_new_day(state)
+        _roll_forward_day_if_stale(state)
         counts = state.setdefault("topic_forward_counts", {})
         users = state.get("users", {})
         for t in topics:

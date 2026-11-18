@@ -39,6 +39,12 @@ def make_message(chat_id, text=None, message_id=1, from_=None, photo=False, vide
     return m
 
 
+def tehran_date(days_ago=0):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)
+            - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+
 def make_channel_post(mid, text):
     return {"message_id": mid,
             "chat": {"id": -100123456, "username": "GodNews24", "type": "channel"},
@@ -139,7 +145,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-18-0.29")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.30")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -1863,14 +1869,16 @@ class FollowBotTest(unittest.TestCase):
         # ایموجی بعد از ۶۰۰ کاراکتر اول (تیتر + اول متن) حساب نمی‌شه
         self.assertEqual(fb.classify_post("🔵 " + "متن " * 200 + "🔴"), set())
 
-    # ---- 0.18: forward counts reset every Tehran day ----
-    def test_forward_counts_reset_on_new_day(self):
+    # ---- 0.30: counts reset with the channel's night post, not at midnight ----
+    def test_forward_counts_kept_across_midnight(self):
+        # پست بعد از نیمه‌شب و قبل از شب بخیر هنوز مال روز قبلی‌ست؛ ریست نمی‌شه
         self.send(USER_A, "/follow سیاسی")
         self.state["topic_forward_counts"] = {"political": 3}
-        self.state["topic_forward_day"] = "2000-01-01"
+        self.state["topic_forward_day"] = tehran_date(1)
         fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
-        self.assertEqual(self.state["topic_forward_counts"], {"political": 1})
-        self.assertEqual(self.state["topic_forward_day"], fb._today_tehran())
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 4})
+        self.assertEqual(self.state["topic_forward_day"], tehran_date(1))
+        self.assertEqual(self.state.get("forward_stats_week", []), [])
 
     def test_forward_counts_kept_same_day(self):
         self.send(USER_A, "/follow سیاسی")
@@ -1879,14 +1887,15 @@ class FollowBotTest(unittest.TestCase):
         fb.handle_channel_post(self.state, make_channel_post(901, "🔴 خبر مهم سیاسی"))
         self.assertEqual(self.state["topic_forward_counts"], {"political": 4})
 
-    def test_followers_view_resets_stale_counts(self):
+    def test_followers_view_keeps_counts_across_midnight(self):
+        # دیدن /followers دیگه به‌خاطر عوض شدن تاریخ آمار رو صفر نمی‌کنه
         self.send(USER_A, "/follow سیاسی")
         self.state["topic_forward_counts"] = {"political": 3}
-        self.state["topic_forward_day"] = "2000-01-01"
+        self.state["topic_forward_day"] = tehran_date(1)
         self.send(ADMIN, "/followers")
         tail = self.last_text().split("📊 خبرهای ارسال‌شده برای هر موضوع:")[1]
-        self.assertIn("🔴 سیاسی: 0", tail)
-        self.assertEqual(self.state["topic_forward_counts"], {})
+        self.assertIn("🔴 سیاسی: 3", tail)
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 3})
 
 
     # ---- 0.19: welcome points to the menu; /send is a menu button ----
@@ -2316,11 +2325,14 @@ class FollowBotTest(unittest.TestCase):
         tail = self.last_text().split("📊 خبرهای ارسال‌شده برای هر موضوع:")[1]
         self.assertIn("🔍 کلمه‌ی دلخواه: 7", tail)
 
-    def test_keyword_forward_count_resets_on_new_day(self):
+    def test_keyword_forward_count_resets_on_night_post(self):
+        # شمارنده‌ی کلمه‌ی دلخواه با پست شب بخیر صفر می‌شه، نه با عوض شدن تاریخ
         self.send(USER_A, "/follow سیاسی")
         self.state["keyword_forward_count"] = 5
-        self.state["topic_forward_day"] = "2000-01-01"
+        self.state["topic_forward_day"] = fb._today_tehran()
         fb.handle_channel_post(self.state, make_channel_post(962, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.state.get("keyword_forward_count"), 5)
+        fb.handle_channel_post(self.state, make_channel_post(963, "شب بخیر 🌙"))
         self.assertEqual(self.state.get("keyword_forward_count"), 0)
 
     # ---- 0.27: راهنمای کامل و دسته‌بندی‌شده برای اعضا و ادمین ----
@@ -2500,6 +2512,136 @@ class FollowBotTest(unittest.TestCase):
         self.assertEqual(len(fb._recent_title(long)), 78)
         self.assertEqual(fb._parse_fa_number("۱"), 1)
         self.assertEqual(fb._parse_fa_number("12"), 12)
+
+    # ---- 0.30: ریست آمار با پست «شب بخیر» + تاریخچه‌ی ۷ روزه + /stats ----
+    def test_is_night_post(self):
+        self.assertTrue(fb._is_night_post("شب بخیر 🌙"))
+        self.assertTrue(fb._is_night_post("شب‌بخیر دوستان"))
+        self.assertTrue(fb._is_night_post("شبتون بخیر"))
+        self.assertFalse(fb._is_night_post("صبح بخیر"))
+        self.assertFalse(fb._is_night_post("🍳 صبحانه خبری گادنیوز۲۴"))
+        self.assertFalse(fb._is_night_post("خبر مهم: " + "متن " * 150 + "شب بخیر"))
+        self.assertFalse(fb._is_night_post(""))
+
+    def test_night_post_archives_and_resets_counts(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.state["topic_forward_counts"] = {"political": 3, "sport": 1}
+        self.state["keyword_forward_count"] = 2
+        self.state["topic_forward_day"] = tehran_date(1)
+        fb.handle_channel_post(self.state, make_channel_post(970, "شب بخیر 🌙"))
+        self.assertEqual(self.state["topic_forward_counts"], {})
+        self.assertEqual(self.state["keyword_forward_count"], 0)
+        self.assertEqual(self.state["topic_forward_day"], fb._today_tehran())
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 1)
+        self.assertEqual(week[0]["day"], tehran_date(1))
+        self.assertEqual(week[0]["counts"], {"political": 3, "sport": 1})
+        self.assertEqual(week[0]["keywords"], 2)
+        # پست شب بخیر خودش فوروارد نمی‌شه و شمرده نمی‌شه
+        self.assertEqual(self.fake.forwarded, [])
+
+    def test_night_post_after_midnight_counts_late_posts_to_old_day(self):
+        # شام خبری بعد از نیمه‌شب و قبل از شب بخیر هنوز مال روز قبلی‌ست
+        self.send(USER_A, "/follow سیاسی")
+        self.state["topic_forward_counts"] = {"political": 3}
+        self.state["topic_forward_day"] = tehran_date(1)
+        fb.handle_channel_post(self.state, make_channel_post(971, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 4})
+        fb.handle_channel_post(self.state, make_channel_post(972, "شب بخیر 🌙"))
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 1)
+        self.assertEqual(week[0]["counts"], {"political": 4})
+
+    def test_fallback_archives_after_missed_night_post(self):
+        # پست شب بخیر یه روز کامل جا مونده: با اولین خبرِ روز بعدش بایگانی و صفر می‌شه
+        self.send(USER_A, "/follow سیاسی")
+        self.state["topic_forward_counts"] = {"political": 3}
+        self.state["keyword_forward_count"] = 5
+        self.state["topic_forward_day"] = tehran_date(3)
+        fb.handle_channel_post(self.state, make_channel_post(973, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 1})
+        self.assertEqual(self.state["keyword_forward_count"], 0)
+        self.assertEqual(self.state["topic_forward_day"], fb._today_tehran())
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 1)
+        self.assertEqual(week[0]["day"], tehran_date(3))
+        self.assertEqual(week[0]["counts"], {"political": 3})
+        self.assertEqual(week[0]["keywords"], 5)
+
+    def test_archive_merges_duplicate_day(self):
+        self.state["topic_forward_counts"] = {"political": 2}
+        self.state["keyword_forward_count"] = 1
+        self.state["topic_forward_day"] = tehran_date(1)
+        fb._archive_forward_day(self.state)
+        self.state["topic_forward_counts"] = {"political": 3, "sport": 2}
+        self.state["keyword_forward_count"] = 1
+        self.state["topic_forward_day"] = tehran_date(1)
+        fb._archive_forward_day(self.state)
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 1)
+        self.assertEqual(week[0]["counts"], {"political": 5, "sport": 2})
+        self.assertEqual(week[0]["keywords"], 2)
+
+    def test_archive_keeps_only_last_7_days(self):
+        for ago in range(8, 0, -1):
+            self.state["topic_forward_counts"] = {"political": ago}
+            self.state["keyword_forward_count"] = 0
+            self.state["topic_forward_day"] = tehran_date(ago)
+            fb._archive_forward_day(self.state)
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 7)
+        self.assertEqual([e["day"] for e in week],
+                         [tehran_date(a) for a in range(7, 0, -1)])
+
+    def test_stats_shows_week_and_today(self):
+        self.state["forward_stats_week"] = [
+            {"day": tehran_date(2), "counts": {"political": 5, "sport": 2}, "keywords": 1},
+            {"day": tehran_date(1), "counts": {"political": 3}, "keywords": 0},
+        ]
+        self.state["topic_forward_counts"] = {"political": 1}
+        self.state["keyword_forward_count"] = 0
+        self.state["topic_forward_day"] = fb._today_tehran()
+        self.send(ADMIN, "/stats")
+        txt = self.last_text()
+        self.assertIn("📈 آمار ۷ روز اخیر", txt)
+        self.assertIn(f"{tehran_date(2)}: 🔴 سیاسی 5 | ⚽ ورزشی 2 | 🔍 کلمه‌ی دلخواه 1", txt)
+        self.assertIn(f"{tehran_date(1)}: 🔴 سیاسی 3", txt)
+        self.assertIn(f"امروز ({fb._today_tehran()}): 🔴 سیاسی 1", txt)
+        self.assertIn("مجموع هفته: 🔴 سیاسی 9 | ⚽ ورزشی 2 | 🔍 کلمه‌ی دلخواه 1", txt)
+
+    def test_stats_empty_state(self):
+        self.state["topic_forward_day"] = fb._today_tehran()
+        self.send(ADMIN, "/stats")
+        txt = self.last_text()
+        self.assertIn("📈 آمار ۷ روز اخیر", txt)
+        self.assertIn(f"امروز ({fb._today_tehran()}): —", txt)
+        self.assertNotIn("مجموع هفته", txt)
+
+    def test_stats_admin_only(self):
+        self.send(USER_A, "/stats")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+
+    def test_stats_button_in_admin_keyboard_only(self):
+        self.send(ADMIN, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        rows = markup["keyboard"]
+        texts = [b["text"] for row in rows for b in row]
+        self.assertIn("📊 آمار هفته", texts)
+        # دکمه‌ی آمار هفته در ردیف جدا و زیر «خبرهای ساعت اخیر» است
+        recent_row = next(i for i, r in enumerate(rows) if any(b["text"] == "🕐 خبرهای ساعت اخیر" for b in r))
+        stats_row = next(i for i, r in enumerate(rows) if any(b["text"] == "📊 آمار هفته" for b in r))
+        self.assertEqual(stats_row, recent_row + 1)
+        self.assertEqual([b["text"] for b in rows[stats_row]], ["📊 آمار هفته"])
+        self.send(USER_A, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        texts = [b["text"] for row in markup["keyboard"] for b in row]
+        self.assertNotIn("📊 آمار هفته", texts)
+
+    def test_stats_in_admin_help(self):
+        self.send(ADMIN, "/help")
+        self.assertIn("/stats", self.last_text())
+        self.send(ADMIN, "/help /stats")
+        self.assertIn("۷ روز اخیر", self.last_text())
         self.assertIsNone(fb._parse_fa_number("سلام"))
 
     def test_recent_help_lists_command(self):
