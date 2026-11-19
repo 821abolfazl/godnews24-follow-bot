@@ -43,8 +43,8 @@ jobs:
         env:
           FOLLOW_BOT_TOKEN: ${{ secrets.FOLLOW_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}   # شناسه‌ی چت خصوصی ادمین برای دستور /followers (Secret)
-                    SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-                              SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # حالت حلقه (دقیق هر ۲۰ دقیقه): در Settings ← Secrets and variables ← Actions ← Variables
           # یک متغیر به اسم LOOP_MINUTES با مقدار 55 بساز. فقط برای repository عمومی کار می‌کنه.
