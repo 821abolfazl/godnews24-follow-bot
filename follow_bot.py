@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.32"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.33"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -463,14 +463,20 @@ def _user_keywords(state, chat_id):
 
 
 def _keyword_hit(text, kw):
-    """اگه کلمه‌ی دلخواه توی متن پست باشه True؛ بدون توجه به فاصله و نیم‌فاصله،
-    و ایموجی تنها هر جای متن باشه حساب می‌شه (مثل ممنوع‌ها)."""
+    """اگه کلمه‌ی دلخواه توی متن پست باشه True؛ فقط وقتی کلمه‌ی کامل
+    (یا عبارت کامل) باشه — «طلا» دیگه «اطلاعات» رو نمی‌گیره (نسخه‌ی ۰.۳۳،
+    مثل اصلاح ممنوع‌ها در ۰.۳۲). نیم‌فاصله مثل فاصله حساب می‌شه، پس
+    «قیمت‌طلا» هنوز با «قیمت طلا» می‌خوره؛ ایموجی تنها هر جای متن باشه
+    حساب می‌شه."""
     if not kw:
         return False
     if _is_single_emoji(kw):
         return _norm_emoji(kw) in _norm_emoji(text or "")
-    t = re.sub(r"[\s\u200c]+", "", text or "")
-    return re.sub(r"[\s\u200c]+", "", kw) in t
+    kw_words = _norm_words(kw)
+    if not kw_words:
+        return False
+    t_words = " " + _norm_words(text) + " "
+    return (" " + kw_words + " ") in t_words
 
 
 def _followword_text(state, chat_id):

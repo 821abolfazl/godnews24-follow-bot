@@ -145,7 +145,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.32")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.33")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2731,6 +2731,35 @@ class FollowBotTest(unittest.TestCase):
                 "این مذاکرات درباره خلع سلاح هسته‌ای و جنگ اوکراین بود")
         fb.handle_channel_post(self.state, make_channel_post(900, text))
         self.assertEqual(self.fake.forwarded, [(USER_A, 900)])
+
+    # ---- 0.33: کلمه‌های دلخواه فقط کلمه‌ی کامل ----
+    def test_keyword_hit_whole_word_only(self):
+        # «طلا» نباید «اطلاعات» رو بگیره (پست DDR6 ساعت ۱۷:۴۸)
+        self.assertFalse(fb._keyword_hit("اولین اطلاعات از استاندارد DDR6 اعلام شد", "طلا"))
+        self.assertFalse(fb._keyword_hit("سکه طلایی شد", "طلا"))
+        # ولی خبر واقعی طلا هنوز می‌رسه
+        self.assertTrue(fb._keyword_hit("قیمت طلا افزایش یافت", "طلا"))
+        self.assertTrue(fb._keyword_hit("قیمت طلا، امروز", "طلا"))
+        # عبارت با نیم‌فاصله هنوز می‌خوره
+        self.assertTrue(fb._keyword_hit("قیمت‌طلا بالا رفت", "قیمت طلا"))
+        self.assertTrue(fb._keyword_hit("موبایل جدید آمد", "موبایل"))
+
+    def test_keyword_post_with_tala_inside_ettelaat_not_forwarded(self):
+        # سناریوی واقعی: خبر DDR6 با «اطلاعات» و کلمه‌ی دلخواه «طلا» نباید برسه
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "طلا")
+        fb.handle_channel_post(self.state, make_channel_post(
+            960, "🔵 اولین اطلاعات از استاندارد DDR6 اعلام شد؛ رشد چشمگیر سرعت و کاهش اندازه ماژول‌های حافظه"))
+        self.assertEqual(self.fake.forwarded, [])
+
+    def test_keyword_post_with_standalone_tala_forwarded(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "طلا")
+        fb.handle_channel_post(self.state, make_channel_post(
+            961, "🔵 قیمت طلا امروز افزایش یافت"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 961)])
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
