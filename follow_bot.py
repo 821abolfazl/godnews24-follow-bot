@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.37"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.38"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -239,9 +239,12 @@ def load_state():
             return _empty_state()
         return _state_from_plaintext(plain)
     db_state = None
+    db_row_missing = False   # fetch موفق بود ولی هنوز ردیفی نیست (ربات تازه‌ست)
     try:
         blob = _supabase_fetch()
-        if blob is not None:
+        if blob is None:
+            db_row_missing = True
+        else:
             db_state = _state_from_plaintext(_fernet().decrypt(blob.encode("utf-8")))
     except SystemExit:
         raise
@@ -256,6 +259,11 @@ def load_state():
         if db_state is None:
             raise
     if db_state is None and file_state is None:
+        if db_row_missing:
+            # دیتابیس خالی و فایلی نیست — ربات تازه‌ست، با حافظه‌ی خالی شروع می‌کنه.
+            # (اگه ردیف بود ولی خراب بود، db_row_missing False می‌مونه و پایین خطا می‌ده —
+            # شروعِ خالی روی ردیف خراب، دنبال‌کننده‌ها رو برای همیشه پاک می‌کرد.)
+            return _empty_state()
         raise SystemExit("cannot load state: supabase unreachable and no local file")
     if db_state is None:
         # مهاجرتِ بار اول (یا دیتابیس خالی): فایل محلی رو به دیتابیس می‌بریم
@@ -3054,8 +3062,14 @@ def process_updates(state):
     return changed
 
 
-def run_once():
-    state = load_state()
+def run_once(state=None):
+    """یک دورِ کامل: آپدیت‌ها رو پردازش می‌کنه، صف رو خالی می‌کنه و جارو رو می‌زنه.
+    نسخه‌ی ۰.۳۸: حافظه فقط یک بار در شروع اجرا خوانده می‌شه و main همون dict
+    رو به هر دور می‌ده — وگرنه هر دور (حدود ۳۰۰۰ بار در روز) کل بلاب از سوپابیس
+    دانلود می‌شد و سقف ۵ گیگابایتِ نسخه‌ی رایگان زود پر می‌شد. داخل یک اجرا
+    فقط همین پروسه حافظه رو می‌نویسه، پس خواندنِ دوباره لازم نیست."""
+    if state is None:
+        state = load_state()
     changed = process_updates(state)
     try:
         # نسخه‌ی ۰.۳۵: خبرهای مانده از اجرای قبل (صف دائمی) — حتی اگه این دور
@@ -3152,9 +3166,10 @@ def main():
         raise SystemExit(1)
     loop_minutes = LOOP_MINUTES
     end = time.time() + loop_minutes * 60 if loop_minutes > 0 else 0
+    state = load_state()   # نسخه‌ی ۰.۳۸: فقط یک بار؛ run_once همون رو می‌گیره
     while True:
         try:
-            run_once()
+            run_once(state)
         except SystemExit:
             raise
         except Exception as ex:

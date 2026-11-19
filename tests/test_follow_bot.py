@@ -165,8 +165,10 @@ class FakeSupabase:
         self.fail_get = False
         self.fail_post = False
         self.fail_status = None   # اگه تنظیم بشه، get/post این کد HTTP رو برمی‌گردونن
+        self.get_calls = 0
 
     def get(self, url, headers=None, timeout=None):
+        self.get_calls += 1
         if self.fail_get:
             raise RuntimeError("supabase down")
         if self.fail_status is not None:
@@ -229,7 +231,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.37")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.38")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2232,7 +2234,7 @@ class FollowBotTest(unittest.TestCase):
         orig_run_once = fb.run_once
         orig_commit = fb.commit_state
         orig_token, orig_loop = fb.TOKEN, fb.LOOP_MINUTES
-        fb.run_once = lambda: calls.__setitem__("run_once", calls["run_once"] + 1)
+        fb.run_once = lambda *a: calls.__setitem__("run_once", calls["run_once"] + 1)
         fb.commit_state = lambda: calls.__setitem__("commit", calls["commit"] + 1)
         fb.TOKEN, fb.LOOP_MINUTES = "x", 0
         try:
@@ -3190,6 +3192,61 @@ class FollowBotTest(unittest.TestCase):
         fb.save_state(self.state)
         # بلاب کوچیکه → فاصله روزانه؛ دو روز گذشته پس پشتیبان نوشته می‌شه
         self.assertTrue(os.path.exists(self.state_path))
+
+    # ---- 0.38: حافظه فقط یک بار در شروع اجرا خوانده می‌شه ----
+    def test_run_once_reuses_passed_state(self):
+        sb = self._enable_supabase()
+        state = fb.load_state()   # یک بار دانلود
+        self.assertEqual(sb.get_calls, 1)
+        fb.run_once(state)   # بدون آپدیت تازه؛ نباید دوباره دانلود کنه
+        self.assertEqual(sb.get_calls, 1)
+
+    def test_run_once_loads_state_when_none(self):
+        sb = self._enable_supabase()
+        fb.run_once()   # بدون state، خودش می‌خونه
+        self.assertEqual(sb.get_calls, 1)
+
+    def test_supabase_empty_db_no_file_starts_empty(self):
+        sb = self._enable_supabase()
+        loaded = fb.load_state()   # دیتابیس خالی و فایلی نیست → حافظه‌ی خالی، نه خطا
+        self.assertEqual(loaded.get("users"), {})
+        self.assertEqual(sb.get_calls, 1)
+
+    def test_supabase_corrupt_row_raises(self):
+        sb = self._enable_supabase()
+        sb.row = "not-a-fernet-token"   # ردیف هست ولی رمزگشایی نمی‌شه
+        with self.assertRaises(SystemExit):
+            fb.load_state()
+
+    def test_main_loads_state_once(self):
+        calls = {"load": 0}
+        loaded = {}
+        seen = {}
+        orig_load = fb.load_state
+        orig_run_once = fb.run_once
+        orig_commit = fb.commit_state
+        orig_token, orig_loop = fb.TOKEN, fb.LOOP_MINUTES
+
+        def counting_load():
+            calls["load"] += 1
+            loaded["state"] = orig_load()
+            return loaded["state"]
+
+        def capture_run_once(state=None):
+            seen["state"] = state
+        fb.load_state = counting_load
+        fb.run_once = capture_run_once
+        fb.commit_state = lambda: None
+        fb.TOKEN, fb.LOOP_MINUTES = "x", 0
+        try:
+            fb.main()
+        finally:
+            fb.load_state = orig_load
+            fb.run_once = orig_run_once
+            fb.commit_state = orig_commit
+            fb.TOKEN, fb.LOOP_MINUTES = orig_token, orig_loop
+        self.assertEqual(calls["load"], 1)
+        self.assertIs(seen.get("state"), loaded.get("state"))
 
 
 class FakeGit:
