@@ -16,20 +16,30 @@
 # (Fernet، کلید از خود توکن ربات ساخته می‌شه) و هیچ‌وقت داده‌ی دنبال‌کننده‌ها
 # به‌صورت متن ساده توی ریپو یا لاگ نمی‌ره. اگه FOLLOW_BOT_TOKEN نباشه، ربات
 # با صدای بلند خطا می‌ده و هیچ فایل متنی نمی‌سازه.
+#
+# حافظه (نسخه‌ی ۰.۳۶): پیش‌فرض توی followers.json می‌مونه؛ اگه دو Secret زیر
+# تنظیم شده باشن، حافظه توی سوپابیس (رایگان، بدون کارت) می‌ره و گیت فقط
+# پشتیبان هفتگی می‌گیره: SUPABASE_URL و SUPABASE_SERVICE_KEY. جدول bot_state
+# با این SQL ساخته می‌شه:
+#   create table bot_state (id int primary key, data text not null,
+#                           updated_at timestamptz default now());
 
 import base64
+import concurrent.futures
+import gzip
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.34"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.37"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -108,43 +118,215 @@ def _fernet():
     return Fernet(key)
 
 
-def load_state():
-    """حافظه رو از followers.json (رمزنگاری‌شده) می‌خونه؛ اگه فایل نباشه، خالی برمی‌گردونه."""
-    state = {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
-             "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {},
-             "forward_stats_week": [],
-             "sent_messages": {}, "recent_forwards": []}
-    if not os.path.exists(STATE_FILE):
-        return state
-    with open(STATE_FILE, encoding="utf-8") as f:
-        raw = f.read().strip()
-    try:
-        plain = _fernet().decrypt(raw.encode("utf-8"))
-    except SystemExit:
-        raise
-    except Exception as ex:
-        raise SystemExit(f"cannot decrypt {STATE_FILE} (wrong FOLLOW_BOT_TOKEN?): {type(ex).__name__}")
+def _empty_state():
+    """حافظه‌ی خالی — کلیدهای تازه اینجا اضافه می‌شن تا فایل قدیمی هم کار کنه."""
+    return {"users": {}, "seen_posts": [], "tg_offset": 0, "pending": {},
+            "custom_topics": {}, "topic_forward_counts": {}, "topic_labels": {},
+            "forward_stats_week": [],
+            "sent_messages": {}, "recent_forwards": [],
+            "send_queue": [], "sweep_cursor": 0, "send_paused_until": 0,
+            "state_saved_ts": 0, "last_git_backup_ts": 0}
+
+
+def _state_from_plaintext(plain):
+    """بایت‌های رمزگشایی‌شده‌ی حافظه (gzip یا ساده) رو به dict تبدیل می‌کنه."""
+    if plain[:2] == b"\x1f\x8b":   # gzip — از نسخه‌ی ۰.۳۵ حافظه فشرده ذخیره می‌شه
+        plain = gzip.decompress(plain)
     data = json.loads(plain.decode("utf-8"))
+    state = _empty_state()
     if isinstance(data, dict):
         state.update(data)
     return state
 
 
+def _encrypt_state(state):
+    """حافظه رو به بلاب رمزنگاری‌شده‌ی آماده‌ی ذخیره تبدیل می‌کنه."""
+    plain = json.dumps(state, ensure_ascii=False).encode("utf-8")
+    return _fernet().encrypt(gzip.compress(plain, compresslevel=6)).decode("ascii")
+
+
+def _read_state_file():
+    """followers.json محلی رو می‌خونه و بایت‌های رمزگشایی‌شده رو برمی‌گردونه؛
+    اگه فایل نباشه None."""
+    if not os.path.exists(STATE_FILE):
+        return None
+    with open(STATE_FILE, encoding="utf-8") as f:
+        raw = f.read().strip()
+    try:
+        return _fernet().decrypt(raw.encode("utf-8"))
+    except SystemExit:
+        raise
+    except Exception as ex:
+        raise SystemExit(f"cannot decrypt {STATE_FILE} (wrong FOLLOW_BOT_TOKEN?): {type(ex).__name__}")
+
+
+# ====== سوپابیس (نسخه‌ی ۰.۳۶؛ رفع عیب‌ها در ۰.۳۷) ======
+# حافظه به‌جای گیت توی یه دیتابیس رایگان Postgres می‌ره: هر ذخیره ردیف رو
+# بازنویسی می‌کنه، پس برخلاف گیت، تاریخچه‌ی نسخه‌ها حجم نمی‌سازه و ریپو
+# برای همیشه کوچک می‌مونه. بلاب همون بایت‌های رمزنگاری‌شده‌ی قبلیه (Fernet)،
+# پس حتی اگه کسی ردیف رو بخونه، چیزی جز متن رمزنگاری‌شده نمی‌بینه.
+SUPABASE_URL = os.environ.get("SUPABASE_URL") or ""
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+SUPABASE_TABLE = "bot_state"
+GIT_BACKUP_INTERVAL_SEC = 7 * 24 * 3600   # پشتیبانِ گیت وقتی فایل بزرگه (هفتگی)
+GIT_BACKUP_INTERVAL_SMALL_SEC = 24 * 3600   # پشتیبانِ گیت وقتی فایل کوچیکه (روزانه)
+GIT_BACKUP_SMALL_TOKEN = 200_000   # زیر این اندازه بلاب، فایل «کوچیک» حساب می‌شه
+
+
+def _git_backup_interval_sec(token_len):
+    """فاصله‌ی پشتیبانِ گیت: فایل کوچیک روزانه، فایل بزرگ هفتگی — تا هم
+    پشتیبان تازه بمونه، هم ریپو با بزرگ شدن حافظه رشد نکنه."""
+    return (GIT_BACKUP_INTERVAL_SMALL_SEC if token_len < GIT_BACKUP_SMALL_TOKEN
+            else GIT_BACKUP_INTERVAL_SEC)
+
+
+def _supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
+
+def _supabase_headers():
+    return {"apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json"}
+
+
+def _supabase_fetch():
+    """بلاب حافظه رو از سوپابیس می‌خونه؛ None یعنی هنوز ردیفی نیست.
+    خطاهای 401/403 (کلید اشتباه) و 404 (جدول ساخته نشده) پیام مشخص دارن
+    تا توی لاگ معلوم بشه دقیقاً چه چیزی رو باید درست کرد."""
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_TABLE}?select=data&id=eq.1"
+    try:
+        r = requests.get(url, headers=_supabase_headers(), timeout=15)
+    except Exception as ex:
+        raise RuntimeError(f"supabase unreachable (network?): {type(ex).__name__}") from ex
+    if r.status_code in (401, 403):
+        raise RuntimeError("supabase auth failed — SUPABASE_SERVICE_KEY is wrong "
+                           "(use the service_role key, not anon)")
+    if r.status_code == 404:
+        raise RuntimeError("supabase table missing — run the bot_state SQL in the SQL Editor")
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        return None
+    return rows[0].get("data")
+
+
+def _supabase_store(blob):
+    """بلاب حافظه رو توی سوپابیس می‌نویسه (upsert ردیف ۱)."""
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_TABLE}"
+    try:
+        r = requests.post(url,
+                          headers={**_supabase_headers(),
+                                   "Prefer": "resolution=merge-duplicates"},
+                          json={"id": 1, "data": blob}, timeout=15)
+    except Exception as ex:
+        raise RuntimeError(f"supabase unreachable (network?): {type(ex).__name__}") from ex
+    if r.status_code in (401, 403):
+        raise RuntimeError("supabase auth failed — SUPABASE_SERVICE_KEY is wrong "
+                           "(use the service_role key, not anon)")
+    if r.status_code == 404:
+        raise RuntimeError("supabase table missing — run the bot_state SQL in the SQL Editor")
+    r.raise_for_status()
+
+
+def load_state():
+    """حافظه رو می‌خونه — از سوپابیس اگه تنظیم شده باشه، وگرنه از followers.json.
+    اگه دیتابیس و فایل هر دو باشن، تازه‌ترین‌شون برنده‌ست (تا قطعیِ دیتابیس
+    یا خرابیِ ذخیره، داده گم نشه). بار اولِ دیتابیس، فایل محلی بهش منتقل می‌شه."""
+    if not _supabase_enabled():
+        plain = _read_state_file()
+        if plain is None:
+            return _empty_state()
+        return _state_from_plaintext(plain)
+    db_state = None
+    try:
+        blob = _supabase_fetch()
+        if blob is not None:
+            db_state = _state_from_plaintext(_fernet().decrypt(blob.encode("utf-8")))
+    except SystemExit:
+        raise
+    except Exception as ex:
+        print("supabase load failed:", ex, "— trying local file")
+    file_state = None
+    try:
+        plain = _read_state_file()
+        if plain is not None:
+            file_state = _state_from_plaintext(plain)
+    except SystemExit:
+        if db_state is None:
+            raise
+    if db_state is None and file_state is None:
+        raise SystemExit("cannot load state: supabase unreachable and no local file")
+    if db_state is None:
+        # مهاجرتِ بار اول (یا دیتابیس خالی): فایل محلی رو به دیتابیس می‌بریم
+        try:
+            _supabase_store(_encrypt_state(file_state))
+            print("migrated state to supabase")
+        except Exception as ex:
+            print("supabase migration failed:", ex)
+        return file_state
+    if file_state is None:
+        return db_state
+    if float(file_state.get("state_saved_ts") or 0) > float(db_state.get("state_saved_ts") or 0):
+        # فایل تازه‌تره (مثلاً بعد از قطعیِ دیتابیس) — همون رو به دیتابیس
+        # برمی‌گردونیم تا دفعه‌ی بعد دوباره از فایل قدیمی شروع نکنه
+        try:
+            _supabase_store(_encrypt_state(file_state))
+            print("resynced newer local state to supabase")
+        except Exception as ex:
+            print("supabase resync failed:", ex)
+        return file_state
+    return db_state
+
+
 def save_state(state):
-    """حافظه رو رمزنگاری‌شده توی followers.json می‌نویسه. بدون توکن، اصلاً فایل نمی‌سازه."""
+    """حافظه رو ذخیره می‌کنه — توی سوپابیس اگه تنظیم شده باشه، وگرنه توی
+    followers.json. اگه ذخیره‌ی دیتابیس خطا بده، فایل محلی نوشته می‌شه تا
+    داده از دست نره (ورک‌فلو کامیتش می‌کنه). هفتگی هم یه پشتیبان توی گیت
+    می‌مونه تا اگه دیتابیس از دست رفت، ازش برگردیم."""
     state["seen_posts"] = state.get("seen_posts", [])[-500:]
     for lst in state.get("sent_messages", {}).values():
         del lst[:-SENT_MESSAGES_CAP]
     _prune_recent_forwards(state)
-    plain = json.dumps(state, ensure_ascii=False).encode("utf-8")
-    token = _fernet().encrypt(plain).decode("ascii")
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        f.write(token + "\n")
+    state["state_saved_ts"] = time.time()
+    token = _encrypt_state(state)
+    # پشتیبانِ گیت: فاصله‌اش به اندازه‌ی بلاب بستگی داره (روزانه وقتی کوچیکه،
+    # هفتگی وقتی بزرگ شد) تا پشتیبان تازه بمونه و ریپو رشد نکنه
+    backup_due = (_supabase_enabled()
+                  and time.time() - float(state.get("last_git_backup_ts") or 0)
+                  > _git_backup_interval_sec(len(token)))
+    if backup_due:
+        state["last_git_backup_ts"] = state["state_saved_ts"]
+        token = _encrypt_state(state)   # مهر زمانیِ پشتیبان هم توی بلاب باشه
+    wrote_db = False
+    if _supabase_enabled():
+        try:
+            _supabase_store(token)
+            wrote_db = True
+        except Exception as ex:
+            print("supabase save failed:", ex, "— writing local file")
+    if not wrote_db or backup_due:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
 
 
 # ====== تلگرام ======
+# خطای آخرین فراخوانی تلگرام، جدا برای هر نخ — مسیر فوروارد با همین می‌فهمه
+# 429 بوده یا 403 یا قطعی شبکه (api فقط None برمی‌گردونه).
+_API_ERROR = threading.local()
+
+
+def _set_last_api_error(err):
+    _API_ERROR.info = err
+
+
+def _get_last_api_error():
+    return getattr(_API_ERROR, "info", None)
+
+
 def api(method, **data):
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+    _set_last_api_error(None)
     try:
         r = requests.post(url, data=data, timeout=30)
         if r.status_code == 429:   # محدودیت سرعت تلگرام: صبر و یک بار تلاش دوباره
@@ -156,9 +338,17 @@ def api(method, **data):
             r = requests.post(url, data=data, timeout=30)
     except requests.RequestException as ex:   # قطعی/کندیِ شبکه نباید کل اجرا رو خراب کنه
         print("telegram network error:", method, type(ex).__name__)
+        _set_last_api_error({"status": "network"})
         return None
     if not r.ok:
         print("telegram error:", method, r.status_code, r.text[:150])
+        err = {"status": r.status_code}
+        if r.status_code == 429:
+            try:
+                err["retry_after"] = int(r.json().get("parameters", {}).get("retry_after", 5))
+            except Exception:
+                err["retry_after"] = 5
+        _set_last_api_error(err)
         return None
     return r.json().get("result")
 
@@ -199,7 +389,17 @@ def forward_message_to(chat_id, from_chat_id, message_id):
                message_id=message_id)
 
 
-SENT_MESSAGES_CAP = 300   # برای هر کاربر، حداکثر چند آیدی پیام خبری نگه داشته بشه
+SENT_MESSAGES_CAP = 100   # برای هر کاربر، حداکثر چند آیدی پیام خبری نگه داشته بشه
+
+# ====== ارسال موازی و صف دائمی (نسخه‌ی ۰.۳۵) ======
+SEND_WORKERS = 20            # چند ارسال هم‌زمان؛ سقف سرعت با SEND_MIN_INTERVAL کنترل می‌شه
+SEND_MIN_INTERVAL = 0.05     # کمترین فاصله‌ی بین شروع دو ارسال (ثانیه) → ~۲۰ پیام در ثانیه
+SEND_MAX_SENDS_PER_DRAIN = 200   # هر برشِ تخلیه‌ی صف حداکثر چند پیام می‌فرسته
+SEND_MAX_SECONDS_PER_DRAIN = 20  # و حداکثر چند ثانیه طول می‌کشه (تا نظرسنجی قفل نشه)
+SEND_QUEUE_MAX_ENTRIES = 500     # سقف خبرهای مانده در صف؛ بیشتر از این، قدیمی‌ترین‌ها حذف می‌شن
+SEND_QUEUE_MAX_AGE_SEC = 48 * 3600  # خبر کهنه‌تر از ۴۸ ساعت از صف حذف می‌شه
+SEND_PAUSE_MAX_SEC = 300     # سقف مکث بعد از 429 تلگرام
+SWEEP_CHUNK = 500            # جاروی روزانه هر دور حداکثر چند کاربر چک می‌کنه
 
 
 def _record_sent(state, chat_id, message_id):
@@ -296,15 +496,23 @@ def _sweep_followers(state):
     """روزی یک بار عضویت همه‌ی دنبال‌کننده‌ها رو چک می‌کنه؛ کسی که از کانال
     رفته (left/kicked) رو از لیست حذف می‌کنه و بهش هشدار می‌ده که دوباره عضو
     بشه. خطای تلگرام = اون کاربر این دور رد می‌شه (هرگز بر اساس خطا حذف نمی‌شه).
-    ادمین هیچ‌وقت حذف نمی‌شه. True یعنی حافظه تغییر کرده."""
+    ادمین هیچ‌وقت حذف نمی‌شه. True یعنی حافظه تغییر کرده.
+    نسخه‌ی ۰.۳۵: تکه‌تکه — هر دور حداکثر ۵۰۰ کاربر چک می‌شه تا با ۱۰ هزار نفر
+    جارو یک ساعت طول نکشه؛ ادامه‌ش دور بعد از همون‌جا برداشته می‌شه."""
     now = time.time()
     last = float(state.get("last_sweep_ts") or 0)
-    if now - last < SWEEP_INTERVAL_SEC:
+    cursor = int(state.get("sweep_cursor") or 0)
+    if now - last < SWEEP_INTERVAL_SEC and cursor == 0:
         return False
-    state["last_sweep_ts"] = now
     users = state.get("users", {})
+    uids = sorted(users)
+    if cursor >= len(uids):
+        state["sweep_cursor"] = 0
+        state["last_sweep_ts"] = now
+        return True
+    chunk = uids[cursor:cursor + SWEEP_CHUNK]
     removed = 0
-    for uid in sorted(users):
+    for uid in chunk:
         if uid == ADMIN_CHAT_ID:
             continue
         try:
@@ -321,6 +529,10 @@ def _sweep_followers(state):
         users.pop(uid, None)
         removed += 1
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
+    state["sweep_cursor"] = cursor + len(chunk) - removed
+    if state["sweep_cursor"] >= len(users):
+        state["sweep_cursor"] = 0
+        state["last_sweep_ts"] = now
     if removed:
         print(f"sweep: {removed} follower(s) removed (left the channel)")
     return True
@@ -1007,7 +1219,8 @@ def _broadcast_target(arg, custom_topics=None, topic_labels=None):
 def _broadcast(state, text, topic=None):
     """متن رو برای دنبال‌کننده‌ها می‌فرسته (همه، یا فقط یه موضوع).
     برمی‌گردونه (تعداد موفق، تعداد ناموفق)؛ ناموفق فقط وقتیه که فراخوانی تلگرام
-    خطا بده یا هیچ جوابی نده."""
+    خطا بده یا هیچ جوابی نده. نسخه‌ی ۰.۳۵: موازی (مثل فوروارد) و کسی که ربات
+    رو بلاک کرده از لیست حذف می‌شه."""
     targets = []
     for uid, u in state.get("users", {}).items():
         ts = u.get("topics", [])
@@ -1016,17 +1229,15 @@ def _broadcast(state, text, topic=None):
         if topic is None or topic in ts:
             targets.append(uid)
     sent = failed = 0
-    for uid in sorted(targets):
-        try:
-            res = send_message(uid, text)
-        except Exception:
-            res = None
+    results = _send_many(_broadcast_one, [(uid, text) for uid in sorted(targets)])
+    for uid, (res, err) in zip(sorted(targets), results):
         if res is None:
             failed += 1
+            if err and err.get("status") == 403:
+                state.get("users", {}).pop(uid, None)
         else:
             sent += 1
             _record_sent(state, uid, res.get("message_id"))
-        time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
     return sent, failed
 
 
@@ -2528,9 +2739,219 @@ def _finish_forward(state, post_id, title, topics, targets, topic_targets, sent_
         state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + 1
 
 
+# ====== ارسال موازی + صف دائمی (نسخه‌ی ۰.۳۵) ======
+# مشکلِ فورواردِ ترتیبی این بود: هر خبر برای هر نفر ~۰.۵ ثانیه طول می‌کشید و
+# اگه اجرا وسطش تموم می‌شد، بقیه‌ی گیرنده‌ها خبر رو هیچ‌وقت نمی‌گرفتن (پست
+# دیده‌شده بود). حالا خبر اول توی صف می‌ره (توی حافظه‌ی رمزنگاری‌شده می‌مونه)،
+# گیرنده‌ها موازی با سقف سرعت ارسال می‌شن، و خبرِ نیمه‌کاره اجرای بعد ادامه
+# پیدا می‌کنه. نخ‌های کارگر فقط HTTP می‌زنن؛ همه‌ی دست‌کاری حافظه با نخ اصلیه.
+_SEND_LOCK = threading.Lock()
+_SEND_NEXT_AT = [0.0]        # monotonic؛ شروع بعدیِ مجاز برای ارسال
+_SEND_PAUSED_UNTIL = [0.0]   # monotonic؛ مکث سراسری بعد از 429 تلگرام
+
+
+def _acquire_send_slot():
+    """فاصله‌ی سراسری بین شروع دو ارسال — با ۰.۰۵ ثانیه می‌شه ~۲۰ پیام در
+    ثانیه، زیر سقف ~۳۰ تلگرام. صبر بیرون از قفله تا نخ‌ها هم‌دیگه رو قفل نکنن."""
+    while True:
+        with _SEND_LOCK:
+            now = time.monotonic()
+            if now >= _SEND_NEXT_AT[0]:
+                _SEND_NEXT_AT[0] = now + SEND_MIN_INTERVAL
+                return
+            wait = _SEND_NEXT_AT[0] - now
+        time.sleep(wait)
+
+
+def _note_send_pause(retry_after):
+    """تلگرام گفت «صبر کن» — تا اون موقع هیچ ارسالی نمی‌شه."""
+    try:
+        wait = int(retry_after or 0)
+    except (TypeError, ValueError):
+        wait = 0
+    if wait <= 0:
+        return
+    wait = min(wait, SEND_PAUSE_MAX_SEC)
+    with _SEND_LOCK:
+        _SEND_PAUSED_UNTIL[0] = max(_SEND_PAUSED_UNTIL[0], time.monotonic() + wait)
+
+
+def _forward_one(uid, pid):
+    """یه فورواردِ تکی با رعایت سقف سرعت؛ برمی‌گردونه (res, err)."""
+    _acquire_send_slot()
+    res = forward_to(uid, pid)
+    err = _get_last_api_error()
+    if err and err.get("status") == 429:
+        _note_send_pause(err.get("retry_after"))
+    return res, err
+
+
+def _broadcast_one(uid, text):
+    """یه پیام برودکستِ تکی با رعایت سقف سرعت؛ برمی‌گردونه (res, err)."""
+    _acquire_send_slot()
+    res = send_message(uid, text)
+    err = _get_last_api_error()
+    if err and err.get("status") == 429:
+        _note_send_pause(err.get("retry_after"))
+    return res, err
+
+
+def _safe_call(func, args):
+    """یه کارِ ارسالی رو اجرا می‌کنه؛ استثنا (مثلاً قطعی شبکه وسط فراخوانی)
+    به‌جای اینکه استخر رو بکشه، «ناموفق» برمی‌گردونه تا گیرنده توی صف بمونه."""
+    try:
+        return func(*args)
+    except Exception as ex:
+        print("send failed:", type(ex).__name__)
+        return None, {"status": "network"}
+
+
+def _send_many(func, args_list):
+    """کارها رو با استخر نخ موازی اجرا می‌کنه؛ نتیجه‌ها به همون ترتیب ورودی
+    برمی‌گردن. خودِ کارها فقط HTTP می‌زنن و حافظه رو دست نمی‌زنن."""
+    if not args_list:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=SEND_WORKERS) as ex:
+        return list(ex.map(lambda a: _safe_call(func, a), args_list))
+
+
+def _forward_recipient(entry, uid):
+    """همه‌ی بخش‌های یه خبر رو برای یه گیرنده می‌فرسته (به ترتیب). برمی‌گردونه
+    (uid, وضعیت, [message_id, ...], پیشرفت)؛ وضعیت: "ok" / "blocked" / "failed".
+    "blocked" یعنی کاربر ربات رو بلاک کرده (حذف می‌شه)؛ "failed" یعنی تایم‌اوت
+    یا خطای سرور — گیرنده با همون پیشرفت توی صف می‌مونه تا دور بعد از همون
+    بخش ادامه بده (تکراری نمی‌ره)."""
+    parts = entry.get("parts") or []
+    start = int((entry.get("progress") or {}).get(uid, 0))
+    mids = []
+    i = start
+    while i < len(parts):
+        res, err = _forward_one(uid, parts[i])
+        if res:
+            mids.append(res.get("message_id"))
+            i += 1
+            continue
+        if err and err.get("status") == 403:
+            return uid, "blocked", mids, i
+        return uid, "failed", mids, i
+    return uid, "ok", mids, i
+
+
+def _enqueue_post(state, post_id, parts, text):
+    """یه خبر رو برای ارسال در صف می‌ذاره (دسته‌بندی + گیرنده‌ها همین‌جا حساب
+    می‌شه)؛ اگه گیرنده‌ای نداشته باشه یا تکراری باشه، هیچی صف نمی‌شه. True یعنی
+    یه ورودی تازه صف شد."""
+    topics, targets, topic_targets = _targets_for_text(state, text, post_id)
+    if not targets:
+        return False
+    queue = state.setdefault("send_queue", [])
+    if any(e.get("post_id") == post_id for e in queue):
+        return False
+    title = _recent_title(text)
+    if len(parts) > 1:
+        title = f"{title} ({_fa_digits(len(parts))} رسانه)"
+    queue.append({
+        "post_id": post_id, "parts": list(parts), "title": title,
+        "topics": sorted(topics), "topic_targets": sorted(topic_targets),
+        "targets": sorted(targets), "pending": sorted(targets),
+        "delivered": {}, "progress": {}, "ts": time.time(),
+    })
+    return True
+
+
+def _complete_queue_entry(state, entry):
+    """خبرِ کامل‌تحویل‌شده: ثبت در /recent، شمارنده‌ها (به‌ازای هر خبر یکی)
+    و چاپ لاگ. قبلاً این کار توی handle_channel_post بود."""
+    delivered = entry.get("delivered") or {}
+    sent_uids = set(delivered)
+    if not sent_uids:
+        return
+    forwarded = {}
+    for uid, mids in delivered.items():
+        forwarded[uid] = mids[0] if len(mids) == 1 else list(mids)
+    _finish_forward(state, entry["post_id"], entry["title"],
+                    set(entry.get("topics") or []),
+                    set(entry.get("targets") or []),
+                    set(entry.get("topic_targets") or []),
+                    sent_uids, forwarded)
+    n = len(entry.get("parts") or [])
+    if n > 1:
+        print(f"forwarded album post {entry['post_id']} ({n} parts) topics={sorted(entry.get('topics') or [])} to {len(sent_uids)} follower(s)")
+    else:
+        print(f"forwarded post {entry['post_id']} topics={sorted(entry.get('topics') or [])} to {len(sent_uids)} follower(s)")
+
+
+def _drain_send_queue(state, max_sends=SEND_MAX_SENDS_PER_DRAIN,
+                      max_seconds=SEND_MAX_SECONDS_PER_DRAIN):
+    """صف ارسال رو خالی می‌کنه — هر خبر به‌ترتیبِ صف، گیرنده‌ها موازی. برمی‌گردونه
+    تعداد پیام‌های تلگرامی که این دور فرستاده شد. خبرِ نیمه‌کاره توی صف می‌مونه
+    تا دور بعد ادامه‌ش بده؛ اجرای ۵۵ دقیقه‌ای وسط فوروارد تموم بشه هم چیزی گم
+    نمی‌شه. هر برش حداکثر ۲۰۰ پیام یا ۲۰ ثانیه‌ست تا نظرسنجی قفل نشه."""
+    queue = state.setdefault("send_queue", [])
+    if not queue:
+        return 0
+    now = time.time()
+    queue[:] = [e for e in queue
+                if now - float(e.get("ts") or 0) <= SEND_QUEUE_MAX_AGE_SEC]
+    if len(queue) > SEND_QUEUE_MAX_ENTRIES:
+        dropped = len(queue) - SEND_QUEUE_MAX_ENTRIES
+        del queue[:-SEND_QUEUE_MAX_ENTRIES]
+        print(f"send queue overflow: dropped {dropped} oldest entr(ies)")
+    if not queue:
+        return 0
+    paused = float(state.get("send_paused_until") or 0)
+    if paused > now:
+        _note_send_pause(paused - now)
+    if time.monotonic() < _SEND_PAUSED_UNTIL[0]:
+        return 0
+    sends = 0
+    started = time.monotonic()
+    users = state.get("users", {})
+    while (queue and sends < max_sends
+           and time.monotonic() - started < max_seconds
+           and time.monotonic() >= _SEND_PAUSED_UNTIL[0]):
+        entry = queue[0]
+        pending = entry.get("pending") or []
+        if not pending:
+            _complete_queue_entry(state, entry)
+            queue.pop(0)
+            continue
+        batch = pending[:max(1, max_sends - sends)]
+        round_sends = sends
+        results = _send_many(_forward_recipient, [(entry, uid) for uid in batch])
+        blocked_any = False
+        for uid, status, new_mids, new_progress in results:
+            sends += len(new_mids)
+            if new_mids:
+                delivered = entry.setdefault("delivered", {})
+                delivered.setdefault(uid, []).extend(new_mids)
+                for mid in new_mids:
+                    _record_sent(state, uid, mid)
+            entry.setdefault("progress", {})[uid] = new_progress
+            if status == "ok":
+                entry["pending"] = [u for u in entry["pending"] if u != uid]
+            elif status == "blocked":
+                blocked_any = True
+                if uid in users:
+                    print(f"removed blocked follower {uid} (bot blocked)")
+                    users.pop(uid, None)
+                entry["pending"] = [u for u in entry["pending"] if u != uid]
+            # "failed": می‌مونه توی pending تا دور بعد از همون بخش ادامه بده
+        if _SEND_PAUSED_UNTIL[0] > time.monotonic():
+            state["send_paused_until"] = time.time() + (_SEND_PAUSED_UNTIL[0] - time.monotonic())
+        if not entry.get("pending"):
+            _complete_queue_entry(state, entry)
+            queue.pop(0)
+        elif sends == round_sends and not blocked_any:
+            break   # هیچی این دور جلو نرفت (همه تایم‌اوت/خطا) — دور بعد دوباره
+    return sends
+
+
 def handle_channel_post(state, post):
     """یه پست کانال رو دسته‌بندی می‌کنه و برای دنبال‌کننده‌های موضوعش فوروارد می‌کنه.
-    True یعنی حافظه تغییر کرده. آیدی دنبال‌کننده‌ها هیچ‌وقت لاگ نمی‌شه."""
+    True یعنی حافظه تغییر کرده. آیدی دنبال‌کننده‌ها هیچ‌وقت لاگ نمی‌شه.
+    نسخه‌ی ۰.۳۵: پست اول توی صف می‌ره و همون دور (موازی، با سقف سرعت) ارسال
+    می‌شه؛ اگه برشِ این دور تموم بشه، بقیه توی صف می‌مونن تا دور بعد."""
     chat = post.get("chat") or {}
     username = (chat.get("username") or "").lstrip("@")
     if username and username != CHANNEL.lstrip("@"):
@@ -2545,23 +2966,9 @@ def handle_channel_post(state, post):
     if _is_night_post(text):
         # آخرین پیام روز کانال: آمار امروز بایگانی و صفر می‌شه (نسخه‌ی ۰.۳۰)
         _archive_forward_day(state)
-    topics, targets, topic_targets = _targets_for_text(state, text, post_id)
     seen.append(post_id)
-    if not targets:
-        return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
-    sent = 0
-    sent_uids = set()
-    forwarded = {}
-    for uid in sorted(targets):
-        res = forward_to(uid, post_id)
-        if res:
-            sent += 1
-            sent_uids.add(uid)
-            _record_sent(state, uid, res.get("message_id"))
-            forwarded[uid] = res.get("message_id")
-        time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
-    _finish_forward(state, post_id, _recent_title(text), topics, targets, topic_targets, sent_uids, forwarded)
-    print(f"forwarded post {post_id} topics={sorted(topics)} to {sent} follower(s)")
+    _enqueue_post(state, post_id, [post_id], text)
+    _drain_send_queue(state)
     return True
 
 
@@ -2571,7 +2978,8 @@ def handle_channel_album(state, posts):
     دنبال‌کننده‌ها می‌رسن (قبلاً فقط عکس اول می‌رفت؛ بقیه چون متنی نداشتن
     بی‌صدا رد می‌شدن — گزارش ۱۹:۵۴، آلبوم لیست قیمت دیجیاتال). شمارنده‌ها
     به‌ازای هر آلبوم یکی اضافه می‌شن، نه هر عکس؛ /recent هم کل آلبوم رو
-    یک خبر می‌بینه و حذفش همه‌ی عکس‌ها رو از چت گیرنده‌ها پاک می‌کنه."""
+    یک خبر می‌بینه و حذفش همه‌ی عکس‌ها رو از چت گیرنده‌ها پاک می‌کنه.
+    نسخه‌ی ۰.۳۵: مثل پست تکی، آلبوم توی صف می‌ره و موازی ارسال می‌شه."""
     posts = [p for p in (posts or []) if isinstance(p, dict) and p.get("message_id")]
     if not posts:
         return False
@@ -2587,32 +2995,11 @@ def handle_channel_album(state, posts):
     text = first.get("text") or first.get("caption") or ""
     if _is_night_post(text):
         _archive_forward_day(state)
-    topics, targets, topic_targets = _targets_for_text(state, text, post_ids[0])
     for pid in post_ids:
         if pid not in seen:
             seen.append(pid)
-    if not targets:
-        return True
-    sent = 0
-    sent_uids = set()
-    forwarded = {}
-    for uid in sorted(targets):
-        mids = []
-        for pid in post_ids:
-            res = forward_to(uid, pid)
-            if res:
-                mids.append(res.get("message_id"))
-                _record_sent(state, uid, res.get("message_id"))
-            time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
-        if mids:
-            sent += 1
-            sent_uids.add(uid)
-            forwarded[uid] = mids
-    title = _recent_title(text)
-    if len(post_ids) > 1:
-        title = f"{title} ({_fa_digits(len(post_ids))} رسانه)"
-    _finish_forward(state, post_ids[0], title, topics, targets, topic_targets, sent_uids, forwarded)
-    print(f"forwarded album post {post_ids[0]} ({len(post_ids)} parts) topics={sorted(topics)} to {sent} follower(s)")
+    _enqueue_post(state, post_ids[0], post_ids, text)
+    _drain_send_queue(state)
     return True
 
 
@@ -2670,6 +3057,13 @@ def process_updates(state):
 def run_once():
     state = load_state()
     changed = process_updates(state)
+    try:
+        # نسخه‌ی ۰.۳۵: خبرهای مانده از اجرای قبل (صف دائمی) — حتی اگه این دور
+        # پست تازه‌ای نیومده باشه، ادامه‌شون می‌دیم.
+        if _drain_send_queue(state):
+            changed = True
+    except Exception as ex:
+        print("send queue رد شد:", repr(ex))
     try:
         if _sweep_followers(state):
             changed = True
@@ -2752,6 +3146,7 @@ def main():
     except Exception:
         pass
     print(f"نسخه‌ی ربات دنبال‌کننده: {BOT_VERSION}")
+    print("state backend:", "supabase" if _supabase_enabled() else "file")
     if not TOKEN:
         print("FOLLOW_BOT_TOKEN is not set — refusing to run (state must never be plaintext)")
         raise SystemExit(1)

@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -72,17 +73,23 @@ class FakeAPI:
         self.deleted = []     # (chat_id, message_id)
         self.delete_fail_ids = set()  # message_ids deleteMessage fails on
         self._mid = 0         # message ids grow like the real API
+        self._lock = threading.Lock()  # _next_id از چند نخ صدا زده می‌شه
         self.member_status = "member"
         self.member_calls = []   # user_ids checked via getChatMember
         self.raise_on_member = False
-        self.send_failures = {}  # chat_id -> "none" | "raise"
+        self.send_failures = {}  # chat_id -> "none" | "raise" | "blocked"
+        # chat_id -> [("rate_limited", retry_after) | ("blocked",) |
+        #             ("timeout",) | ("server",) | ("pass",)] — هر بار یکی مصرف می‌شه
+        self.forward_errors = {}
         self.updates = []
 
     def _next_id(self):
-        self._mid += 1
-        return self._mid
+        with self._lock:
+            self._mid += 1
+            return self._mid
 
     def api(self, method, **data):
+        fb._set_last_api_error(None)
         if method == "sendMessage":
             chat_id = str(data.get("chat_id"))
             fail = self.send_failures.get(chat_id)
@@ -90,11 +97,32 @@ class FakeAPI:
                 raise RuntimeError("telegram down")
             if fail == "none":
                 return None
+            if fail == "blocked":
+                fb._set_last_api_error({"status": 403})
+                return None
             self.sent.append((chat_id, data.get("text", ""),
                               data.get("reply_markup")))
             return {"message_id": self._next_id()}
         if method == "forwardMessage":
-            self.forwarded.append((str(data.get("chat_id")), data.get("message_id")))
+            chat_id = str(data.get("chat_id"))
+            errs = self.forward_errors.get(chat_id)
+            if errs:
+                kind, *rest = errs.pop(0)
+                if kind == "rate_limited":
+                    fb._set_last_api_error(
+                        {"status": 429, "retry_after": rest[0] if rest else 5})
+                    return None
+                if kind == "blocked":
+                    fb._set_last_api_error({"status": 403})
+                    return None
+                if kind == "timeout":
+                    fb._set_last_api_error({"status": "network"})
+                    return None
+                if kind == "server":
+                    fb._set_last_api_error({"status": 500})
+                    return None
+                # "pass": این فراخوانی عمداً موفق می‌شه (برای تستِ خرابیِ بخش دوم آلبوم)
+            self.forwarded.append((chat_id, data.get("message_id")))
             self.forward_calls.append(dict(data))
             return {"message_id": self._next_id()}
         if method == "deleteMessage":
@@ -116,6 +144,44 @@ class FakeAPI:
         return list(self.updates)
 
 
+class FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeSupabase:
+    """سوپابیس قلابی: بلاب حافظه رو توی حافظه نگه می‌داره."""
+
+    def __init__(self):
+        self.row = None
+        self.fail_get = False
+        self.fail_post = False
+        self.fail_status = None   # اگه تنظیم بشه، get/post این کد HTTP رو برمی‌گردونن
+
+    def get(self, url, headers=None, timeout=None):
+        if self.fail_get:
+            raise RuntimeError("supabase down")
+        if self.fail_status is not None:
+            return FakeResponse(self.fail_status, {"message": "error"})
+        return FakeResponse(200, [{"data": self.row}] if self.row is not None else [])
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        if self.fail_post:
+            raise RuntimeError("supabase down")
+        if self.fail_status is not None:
+            return FakeResponse(self.fail_status, {"message": "error"})
+        self.row = (json or {}).get("data")
+        return FakeResponse(201, {})
+
+
 class FollowBotTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -129,12 +195,19 @@ class FollowBotTest(unittest.TestCase):
         fb.api_get_updates = self.fake.api_get_updates
         fb._MEMBER_CACHE.clear()
         fb._SUBMIT_LAST.clear()
+        self._orig_send_interval = fb.SEND_MIN_INTERVAL
+        fb.SEND_MIN_INTERVAL = 0   # تست‌ها سریع باشن؛ سقف سرعت جدا تست می‌شه
+        self._orig_sb = (fb.SUPABASE_URL, fb.SUPABASE_SERVICE_KEY, fb.requests)
         self.state = fb.load_state()
 
     def tearDown(self):
         fb.api = self._orig_api
         fb.api_get_updates = self._orig_get
         fb.STATE_FILE = self._orig_state_file
+        fb.SEND_MIN_INTERVAL = self._orig_send_interval
+        fb._SEND_PAUSED_UNTIL[0] = 0.0
+        fb._SEND_NEXT_AT[0] = 0.0
+        fb.SUPABASE_URL, fb.SUPABASE_SERVICE_KEY, fb.requests = self._orig_sb
 
     def send(self, chat_id, text):
         fb.handle_message(self.state, make_message(chat_id, text))
@@ -156,7 +229,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.34")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.37")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -1606,7 +1679,7 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("political", self.state["users"][USER_B]["topics"])
         # خبر سیاسی هنوز به همون موضوع می‌رسه
         fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
-        self.assertEqual(self.fake.forwarded, [(USER_A, 900), (USER_B, 900)])
+        self.assertEqual(sorted(self.fake.forwarded), sorted([(USER_A, 900), (USER_B, 900)]))
 
     def test_rename_builtin_rejections(self):
         ok, reply = fb._rename_topic(self.state, "political", "ورزشی")
@@ -1714,9 +1787,9 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("🔑 کلمه‌های کلیدی", texts)
 
     def test_record_sent_caps_per_user(self):
-        for i in range(305):
+        for i in range(105):
             fb._record_sent(self.state, USER_A, i + 1)
-        self.assertEqual(len(self.state["sent_messages"][USER_A]), 300)
+        self.assertEqual(len(self.state["sent_messages"][USER_A]), 100)
         self.assertEqual(self.state["sent_messages"][USER_A][0], 6)
 
     def test_help_lists_clear(self):
@@ -2057,7 +2130,8 @@ class FollowBotTest(unittest.TestCase):
         # پست بعدی بدون کلمه‌ی ممنوع به هر دو می‌رسه
         fb.handle_channel_post(self.state, make_channel_post(
             901, "🔴 فوری: حمله جدید؛ تیم فوتبال پرسپولیس به فینال رفت"))
-        self.assertEqual(self.fake.forwarded, [(USER_B, 900), (USER_A, 901), (USER_B, 901)])
+        self.assertEqual(sorted(self.fake.forwarded),
+                         sorted([(USER_B, 900), (USER_A, 901), (USER_B, 901)]))
 
     def test_blocked_emoji_per_topic(self):
         self.send(USER_A, "/follow سیاسی")
@@ -2315,7 +2389,7 @@ class FollowBotTest(unittest.TestCase):
         self.send(USER_A, "پرسپولیس")
         self.send(USER_B, "/follow ورزشی")
         fb.handle_channel_post(self.state, make_channel_post(960, "⚽ پرسپولیس قهرمان شد"))
-        self.assertEqual(self.fake.forwarded, [(USER_A, 960), (USER_B, 960)])
+        self.assertEqual(sorted(self.fake.forwarded), sorted([(USER_A, 960), (USER_B, 960)]))
         self.assertEqual(self.state.get("keyword_forward_count"), 1)
         self.assertEqual(self.state.get("topic_forward_counts", {}), {"sport": 1})
 
@@ -2385,7 +2459,7 @@ class FollowBotTest(unittest.TestCase):
         self.send(USER_B, "➕ اضافه کردن کلمه")
         self.send(USER_B, "پرسپولیس")
         fb.handle_channel_post(self.state, make_channel_post(970, "⚽ پرسپولیس قهرمان شد"))
-        self.assertEqual(self.fake.forwarded, [(USER_A, 970), (USER_B, 970)])
+        self.assertEqual(sorted(self.fake.forwarded), sorted([(USER_A, 970), (USER_B, 970)]))
         # یه خبر، دو گیرنده‌ی کلمه‌ای — شمارنده فقط یکی بالا می‌ره (مثل موضوع‌ها)
         self.assertEqual(self.state.get("keyword_forward_count"), 1)
         self.assertEqual(self.state.get("topic_forward_counts", {}), {})
@@ -2803,9 +2877,14 @@ class FollowBotTest(unittest.TestCase):
             {"update_id": 5, "channel_post": make_album_post(202, "G2")},
         ]
         fb.process_updates(self.state)
-        self.assertEqual(self.fake.forwarded,
-                         [(USER_A, 101), (USER_A, 102), (USER_A, 103),
-                          (USER_B, 201), (USER_B, 202)])
+        self.assertEqual(sorted(self.fake.forwarded),
+                         sorted([(USER_A, 101), (USER_A, 102), (USER_A, 103),
+                                 (USER_B, 201), (USER_B, 202)]))
+        # بخش‌های هر آلبوم برای همون گیرنده به‌ترتیب می‌رسن
+        a_parts = [p for u, p in self.fake.forwarded if u == USER_A]
+        b_parts = [p for u, p in self.fake.forwarded if u == USER_B]
+        self.assertEqual(a_parts, [101, 102, 103])
+        self.assertEqual(b_parts, [201, 202])
         counts = self.state.get("topic_forward_counts", {})
         self.assertEqual(counts.get("political"), 1)
         self.assertEqual(counts.get("sport"), 1)
@@ -2850,6 +2929,267 @@ class FollowBotTest(unittest.TestCase):
         self.assertEqual(self.fake.forwarded, [(USER_A, 101)])
         recs = fb._recent_forwards(self.state)
         self.assertNotIn("رسانه", recs[0].get("title", ""))
+
+    # ---- 0.35: فوروارد موازی + صف دائمی ----
+    def _follow_many(self, uids, topic="سیاسی"):
+        for uid in uids:
+            self.send(uid, f"/follow {topic}")
+
+    def test_parallel_forward_reaches_all_recipients(self):
+        uids = [str(1000 + i) for i in range(5)]
+        self._follow_many(uids)
+        fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(sorted(self.fake.forwarded),
+                         sorted([(u, 900) for u in uids]))
+        self.assertEqual(self.state.get("send_queue"), [])
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {"political": 1})
+
+    def test_queue_persists_across_save_load(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow سیاسی")
+        self.assertTrue(fb._enqueue_post(self.state, 900, [900], "🔴 خبر مهم سیاسی"))
+        fb.save_state(self.state)
+        loaded = fb.load_state()
+        self.assertEqual(len(loaded.get("send_queue") or []), 1)
+        self.assertEqual(loaded["send_queue"][0]["pending"], [USER_A, USER_B])
+        fb._drain_send_queue(loaded)
+        self.assertEqual(sorted(self.fake.forwarded), [(USER_A, 900), (USER_B, 900)])
+        self.assertEqual(loaded.get("send_queue"), [])
+
+    def test_queue_resumes_after_timeout_failure(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow سیاسی")
+        self.fake.forward_errors = {USER_A: [("timeout",), ("timeout",)]}
+        fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
+        # B گرفت، A تایم‌اوت خورد و توی صف موند
+        self.assertIn((USER_B, 900), self.fake.forwarded)
+        self.assertNotIn((USER_A, 900), self.fake.forwarded)
+        self.assertEqual(len(self.state.get("send_queue") or []), 1)
+        self.assertEqual(self.state["send_queue"][0]["pending"], [USER_A])
+        # دور بعد (خطا رفع شده) A هم می‌گیره؛ شمارنده فقط یکیه
+        fb._drain_send_queue(self.state)
+        self.assertIn((USER_A, 900), self.fake.forwarded)
+        self.assertEqual(self.state.get("send_queue"), [])
+        self.assertEqual(self.state.get("topic_forward_counts", {}), {"political": 1})
+
+    def test_forward_429_sets_pause_and_retries_next_drain(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.forward_errors = {USER_A: [("rate_limited", 120)]}
+        fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.fake.forwarded, [])
+        self.assertEqual(len(self.state.get("send_queue") or []), 1)
+        self.assertGreater(float(self.state.get("send_paused_until") or 0), time.time())
+        # تا وقتی مکث تموم نشده، تخلیه هیچی نمی‌فرسته
+        self.assertEqual(fb._drain_send_queue(self.state), 0)
+        # مکث که تموم شد (و خطا رفع شد)، خبر می‌رسه
+        self.state["send_paused_until"] = 0
+        fb._SEND_PAUSED_UNTIL[0] = 0.0
+        fb._drain_send_queue(self.state)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 900)])
+        self.assertEqual(self.state.get("send_queue"), [])
+
+    def test_forward_403_removes_blocked_user(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow سیاسی")
+        self.fake.forward_errors = {USER_B: [("blocked",)]}
+        fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر مهم سیاسی"))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 900)])
+        self.assertNotIn(USER_B, self.state.get("users", {}))
+        self.assertIn(USER_A, self.state.get("users", {}))
+        self.assertEqual(self.state.get("send_queue"), [])
+
+    def test_album_partial_progress_no_duplicate(self):
+        self.send(USER_A, "/follow سیاسی")
+        # بخش اول می‌رسه، بخش دوم دو بار تایم‌اوت می‌خوره و می‌مونه برای دور بعد
+        self.fake.forward_errors = {USER_A: [("pass",), ("timeout",), ("timeout",)]}
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1")]
+        fb.handle_channel_album(self.state, posts)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101)])
+        self.assertEqual(len(self.state.get("send_queue") or []), 1)
+        self.assertEqual(self.state["send_queue"][0]["progress"], {USER_A: 1})
+        # دور بعد فقط بخش دوم می‌رسه — بخش اول تکراری نمی‌ره
+        fb._drain_send_queue(self.state)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.state.get("send_queue"), [])
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(sorted(recs[0]["targets"][USER_A]),
+                         sorted(self.state["sent_messages"][USER_A]))
+
+    def test_order_preserved_across_posts(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.handle_channel_post(self.state, make_channel_post(900, "🔴 خبر اول سیاسی"))
+        fb.handle_channel_post(self.state, make_channel_post(901, "🔴 خبر دوم سیاسی"))
+        got = [p for u, p in self.fake.forwarded if u == USER_A]
+        self.assertEqual(got, [900, 901])
+
+    def test_state_gzip_roundtrip_and_old_format(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)
+        loaded = fb.load_state()
+        self.assertEqual(loaded.get("users"), self.state.get("users"))
+        # فرمت قدیمی (بدون gzip) هنوز خوانده می‌شه
+        plain = json.dumps(self.state, ensure_ascii=False).encode("utf-8")
+        token = fb._fernet().encrypt(plain).decode("ascii")
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+        loaded_old = fb.load_state()
+        self.assertEqual(loaded_old.get("users"), self.state.get("users"))
+
+    def test_sweep_chunked_across_runs(self):
+        for i in range(1200):
+            self.state["users"][str(3000 + i)] = {"topics": ["political"]}
+        self.fake.member_status = "member"
+        self.assertTrue(fb._sweep_followers(self.state))
+        self.assertEqual(len(self.fake.member_calls), 500)
+        self.assertEqual(self.state.get("sweep_cursor"), 500)
+        fb._sweep_followers(self.state)
+        self.assertEqual(len(self.fake.member_calls), 1000)
+        self.assertEqual(self.state.get("sweep_cursor"), 1000)
+        fb._sweep_followers(self.state)
+        self.assertEqual(len(self.fake.member_calls), 1200)
+        self.assertEqual(self.state.get("sweep_cursor"), 0)
+        self.assertGreater(float(self.state.get("last_sweep_ts") or 0), 0)
+        # تا ۲۴ ساعت بعد، جارو دوباره اجرا نمی‌شه
+        self.assertFalse(fb._sweep_followers(self.state))
+
+    def test_rate_limiter_spaces_sends(self):
+        fb.SEND_MIN_INTERVAL = 0.05
+        start = time.monotonic()
+        for _ in range(3):
+            fb._acquire_send_slot()
+        self.assertGreaterEqual(time.monotonic() - start, 0.09)
+
+    def test_broadcast_removes_blocked_user(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow سیاسی")
+        self.fake.send_failures = {USER_B: "blocked"}
+        sent, failed = fb._broadcast(self.state, "سلام به همه")
+        self.assertEqual((sent, failed), (1, 1))
+        self.assertNotIn(USER_B, self.state.get("users", {}))
+        self.assertIn(USER_A, self.state.get("users", {}))
+
+    # ---- 0.36–0.37: حافظه در سوپابیس ----
+    def _enable_supabase(self):
+        fb.SUPABASE_URL = "https://example.supabase.co"
+        fb.SUPABASE_SERVICE_KEY = "test-service-key"
+        self.sb = FakeSupabase()
+        fb.requests = self.sb
+        return self.sb
+
+    def test_supabase_save_load_roundtrip(self):
+        sb = self._enable_supabase()
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)
+        self.assertIsNotNone(sb.row)
+        loaded = fb.load_state()
+        self.assertEqual(loaded.get("users"), self.state.get("users"))
+        self.assertEqual(loaded.get("topic_forward_counts"),
+                         self.state.get("topic_forward_counts"))
+
+    def test_supabase_migrates_from_local_file(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # حالت فایل: followers.json نوشته می‌شه
+        self.assertTrue(os.path.exists(self.state_path))
+        sb = self._enable_supabase()
+        loaded = fb.load_state()
+        self.assertIn(USER_A, loaded.get("users", {}))
+        self.assertIsNotNone(sb.row)   # فایل به دیتابیس منتقل شد
+
+    def test_supabase_newest_wins(self):
+        sb = self._enable_supabase()
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # ردیف دیتابیس با saved_ts تازه
+        old_state = fb.load_state()
+        old_state["users"][USER_B] = {"topics": ["sport"]}
+        old_state["state_saved_ts"] = 1.0   # فایل قدیمی‌تره
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            f.write(fb._encrypt_state(old_state) + "\n")
+        loaded = fb.load_state()
+        self.assertIn(USER_A, loaded.get("users", {}))
+        self.assertNotIn(USER_B, loaded.get("users", {}))
+        # حالا فایل تازه‌تره
+        new_state = fb.load_state()
+        new_state["users"][USER_B] = {"topics": ["sport"]}
+        new_state["state_saved_ts"] = time.time() + 1000
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            f.write(fb._encrypt_state(new_state) + "\n")
+        loaded2 = fb.load_state()
+        self.assertIn(USER_B, loaded2.get("users", {}))
+
+    def test_supabase_save_failure_writes_local_file(self):
+        sb = self._enable_supabase()
+        sb.fail_post = True
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)
+        self.assertTrue(os.path.exists(self.state_path))
+        loaded = fb._state_from_plaintext(fb._read_state_file())
+        self.assertIn(USER_A, loaded.get("users", {}))
+
+    def test_supabase_load_failure_falls_back_to_file(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # فایل محلی
+        sb = self._enable_supabase()
+        sb.fail_get = True
+        loaded = fb.load_state()
+        self.assertIn(USER_A, loaded.get("users", {}))
+
+    def test_weekly_git_backup(self):
+        self._enable_supabase()
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)
+        self.assertTrue(os.path.exists(self.state_path))   # پشتیبانِ بار اول
+        os.remove(self.state_path)
+        fb.save_state(self.state)
+        self.assertFalse(os.path.exists(self.state_path))  # تا هفت روز بعد، پشتیبان تازه‌ای نیست
+
+    # ---- 0.37: رفع عیب‌های سوپابیس ----
+    def test_supabase_auth_error_falls_back_to_file(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # فایل محلی
+        sb = self._enable_supabase()
+        sb.fail_status = 401   # کلید اشتباه (مثلاً anon به‌جای service_role)
+        loaded = fb.load_state()
+        self.assertIn(USER_A, loaded.get("users", {}))
+
+    def test_supabase_table_missing_falls_back_to_file(self):
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # فایل محلی
+        sb = self._enable_supabase()
+        sb.fail_status = 404   # جدول bot_state ساخته نشده
+        loaded = fb.load_state()
+        self.assertIn(USER_A, loaded.get("users", {}))
+
+    def test_supabase_resyncs_newer_file_to_db(self):
+        sb = self._enable_supabase()
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)   # ردیف دیتابیس با saved_ts تازه
+        new_state = fb.load_state()
+        new_state["users"][USER_B] = {"topics": ["sport"]}
+        new_state["state_saved_ts"] = time.time() + 1000   # فایل تازه‌تره
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            f.write(fb._encrypt_state(new_state) + "\n")
+        loaded = fb.load_state()
+        self.assertIn(USER_B, loaded.get("users", {}))
+        # فایل تازه‌تر به دیتابیس برگردونده شد
+        after = fb._state_from_plaintext(fb._fernet().decrypt(sb.row.encode("utf-8")))
+        self.assertIn(USER_B, after.get("users", {}))
+
+    def test_git_backup_interval(self):
+        self.assertEqual(fb._git_backup_interval_sec(1000), 24 * 3600)
+        self.assertEqual(fb._git_backup_interval_sec(300_000), 7 * 24 * 3600)
+
+    def test_daily_git_backup_when_due(self):
+        self._enable_supabase()
+        self.send(USER_A, "/follow سیاسی")
+        fb.save_state(self.state)
+        self.assertTrue(os.path.exists(self.state_path))
+        os.remove(self.state_path)
+        self.state["last_git_backup_ts"] = time.time() - 2 * 24 * 3600
+        fb.save_state(self.state)
+        # بلاب کوچیکه → فاصله روزانه؛ دو روز گذشته پس پشتیبان نوشته می‌شه
+        self.assertTrue(os.path.exists(self.state_path))
 
 
 class FakeGit:
