@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.31"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.32"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -592,12 +592,21 @@ def _is_single_emoji(tok):
     return bool(t) and len(_EMOJI_RE.findall(t)) == 1 and not _EMOJI_RE.sub("", t).strip()
 
 
+def _norm_words(s):
+    """فاصله‌ها، نیم‌فاصله و نقطه‌گذاری رو به یه فاصله تبدیل می‌کنه تا مرز
+    کلمه‌ها معلوم بشه (برای تطبیق کلمه‌ی کامل در ممنوع‌ها)."""
+    return re.sub(r"[\s\u200c\u200d.,،!؟:؛…«»\"'()\-/]+", " ", s or "").strip()
+
+
 def _blocked_hit(text, blocked):
     """اگه پست یه کلمه یا ایموجی ممنوع داشته باشه، همون مورد رو برمی‌گردونه؛
-    وگرنه None. ایموجی هر جای متن باشه حساب می‌شه؛ کلمه‌ها بدون توجه به
-    فاصله و نیم‌فاصله چک می‌شن (مثلاً «قیمت طلا» با «قیمت‌طلا» هم می‌خوره)."""
+    وگرنه None. ایموجی هر جای متن باشه حساب می‌شه؛ کلمه‌ها فقط وقتی حساب
+    می‌شن که کلمه‌ی کامل (یا عبارت کامل) باشن — «نون» دیگه «اکنون»، «قانون»
+    و «کانون» رو نمی‌گیره و «نان» دیگه «لبنان» و «نانوایی» رو نمی‌گیره
+    (نسخه‌ی ۰.۳۲). نیم‌فاصله مثل فاصله حساب می‌شه، پس «قیمت‌طلا» هنوز
+    با «قیمت طلا» می‌خوره."""
     t = text or ""
-    t_words = re.sub(r"[\s\u200c]+", "", t)
+    t_words = " " + _norm_words(t) + " "
     t_emoji = _norm_emoji(t)
     for b in blocked or []:
         if not b:
@@ -605,7 +614,8 @@ def _blocked_hit(text, blocked):
         if _is_single_emoji(b):
             if _norm_emoji(b) in t_emoji:
                 return b
-        elif re.sub(r"[\s\u200c]+", "", b) in t_words:
+        b_words = _norm_words(b)
+        if b_words and (" " + b_words + " ") in t_words:
             return b
     return None
 

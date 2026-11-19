@@ -145,7 +145,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.31")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.32")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2703,6 +2703,34 @@ class FollowBotTest(unittest.TestCase):
         self.assertEqual(self.fake.sent[-1][0], USER_A)
         saved = fb.load_state()
         self.assertEqual(saved.get("tg_offset"), 31)
+
+    # ---- 0.32: blocked words match whole words, not substrings ----
+    def test_blocked_hit_whole_word_nun(self):
+        # «نون» نباید «اکنون»، «قانون» و «کانون» رو بگیره (پست گاردین ۱۳:۵۲)
+        self.assertIsNone(fb._blocked_hit("🔴 نشست اکنون پایان یافت", ["نون"]))
+        self.assertIsNone(fb._blocked_hit("🔴 قانون تازه مجلس", ["نون"]))
+        self.assertIsNone(fb._blocked_hit("🔴 کانون وکلای دادگستری", ["نون"]))
+        # ولی خبر واقعی نان هنوز بلاک می‌شه
+        self.assertEqual(fb._blocked_hit("🔴 قیمت نون رفت بالا", ["نون"]), "نون")
+        self.assertEqual(fb._blocked_hit("🔴 قیمت نون، امروز", ["نون"]), "نون")
+
+    def test_blocked_hit_whole_word_nan(self):
+        self.assertIsNone(fb._blocked_hit("🔴 لبنان درگیر جنگ شد", ["نان"]))
+        self.assertIsNone(fb._blocked_hit("🔴 نانوایی تازه افتتاح شد", ["نان"]))
+        self.assertEqual(fb._blocked_hit("🔴 قیمت نان رفت بالا", ["نان"]), "نان")
+
+    def test_blocked_hit_phrase_whole_words(self):
+        self.assertEqual(fb._blocked_hit("🔴 حمله اوکراین شروع شد", ["حمله اوکراین"]), "حمله اوکراین")
+        self.assertIsNone(fb._blocked_hit("🔴 جنگ اوکراین ادامه دارد", ["حمله اوکراین"]))
+
+    def test_guardian_post_not_blocked_for_political(self):
+        # سناریوی واقعی ۱۳:۵۲: پست گاردین با «اکنون» و ممنوع «نون» باید برسه
+        self.send(USER_A, "/follow سیاسی")
+        self.state["topic_blocked"] = {"political": ["نون", "نان"]}
+        text = ("🔴 گاردین: دیدار سه‌جانبه ترامپ، شی جین‌پینگ و پوتین اکنون پایان یافته است. "
+                "این مذاکرات درباره خلع سلاح هسته‌ای و جنگ اوکراین بود")
+        fb.handle_channel_post(self.state, make_channel_post(900, text))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 900)])
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""
