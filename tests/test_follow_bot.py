@@ -51,6 +51,17 @@ def make_channel_post(mid, text):
             "text": text}
 
 
+def make_album_post(mid, gid, caption=None):
+    """یه عکس از یه آلبوم کانال: فقط عکس اول کپشن داره، بقیه بدون متن‌ان."""
+    p = {"message_id": mid,
+         "chat": {"id": -100123456, "username": "GodNews24", "type": "channel"},
+         "media_group_id": gid,
+         "photo": [{"file_id": f"file-{mid}"}]}
+    if caption is not None:
+        p["caption"] = caption
+    return p
+
+
 class FakeAPI:
     """Captures every Telegram call instead of hitting the network."""
 
@@ -145,7 +156,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.33")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.34")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2760,6 +2771,86 @@ class FollowBotTest(unittest.TestCase):
         fb.handle_channel_post(self.state, make_channel_post(
             961, "🔵 قیمت طلا امروز افزایش یافت"))
         self.assertEqual(self.fake.forwarded, [(USER_A, 961)])
+
+    # ---- 0.34: channel albums forward completely ----
+    def test_album_forwards_all_parts(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow ورزشی")
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی\nتصویر اول موبایل‌ها"),
+                 make_album_post(102, "G1"),
+                 make_album_post(103, "G1")]
+        self.assertTrue(fb.handle_channel_album(self.state, posts))
+        self.assertEqual(self.fake.forwarded,
+                         [(USER_A, 101), (USER_A, 102), (USER_A, 103)])
+        for pid in (101, 102, 103):
+            self.assertIn(pid, self.state.get("seen_posts", []))
+        self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
+        self.assertIn("۳ رسانه", recs[0].get("title", ""))
+        tgts = recs[0].get("targets", {})
+        self.assertEqual(len(tgts), 1)
+        self.assertEqual(len(list(tgts.values())[0]), 3)
+
+    def test_album_via_process_updates_two_albums(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.send(USER_B, "/follow ورزشی")
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+            {"update_id": 2, "channel_post": make_album_post(102, "G1")},
+            {"update_id": 3, "channel_post": make_album_post(103, "G1")},
+            {"update_id": 4, "channel_post": make_album_post(201, "G2", "⚽ پرسپولیس قهرمان شد")},
+            {"update_id": 5, "channel_post": make_album_post(202, "G2")},
+        ]
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded,
+                         [(USER_A, 101), (USER_A, 102), (USER_A, 103),
+                          (USER_B, 201), (USER_B, 202)])
+        counts = self.state.get("topic_forward_counts", {})
+        self.assertEqual(counts.get("political"), 1)
+        self.assertEqual(counts.get("sport"), 1)
+
+    def test_album_no_match_forwards_nothing(self):
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1"),
+                 make_album_post(103, "G1")]
+        self.assertTrue(fb.handle_channel_album(self.state, posts))
+        self.assertEqual(self.fake.forwarded, [])
+        for pid in (101, 102, 103):
+            self.assertIn(pid, self.state.get("seen_posts", []))
+
+    def test_album_keyword_match_counts_once(self):
+        self._open_followword_hub()
+        self.send(USER_A, "➕ اضافه کردن کلمه")
+        self.send(USER_A, "موبایل")
+        posts = [make_album_post(101, "G1", "قیمت موبایل‌ها"),
+                 make_album_post(102, "G1")]
+        fb.handle_channel_album(self.state, posts)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.state.get("keyword_forward_count"), 1)
+
+    def test_album_delete_removes_all_parts(self):
+        self.send(USER_A, "/follow سیاسی")
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1"),
+                 make_album_post(103, "G1")]
+        fb.handle_channel_album(self.state, posts)
+        recs = fb._recent_forwards(self.state)
+        tgt_mids = list(recs[0]["targets"].values())[0]
+        res = fb._delete_recent(self.state, 1)
+        self.assertEqual(res[0], 3)
+        self.assertEqual(res[1], 0)
+        self.assertIn("۳ رسانه", res[2])
+        self.assertEqual(sorted(m for (_, m) in self.fake.deleted), sorted(tgt_mids))
+
+    def test_album_single_photo_group(self):
+        self.send(USER_A, "/follow سیاسی")
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی")]
+        fb.handle_channel_album(self.state, posts)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101)])
+        recs = fb._recent_forwards(self.state)
+        self.assertNotIn("رسانه", recs[0].get("title", ""))
+
 
 class FakeGit:
     """Stands in for subprocess in commit_state tests."""

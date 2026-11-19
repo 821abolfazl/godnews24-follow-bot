@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.33"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-19-0.34"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -1409,15 +1409,18 @@ def _delete_recent(state, index):
     rec = recs[index - 1]
     deleted = failed = 0
     for uid, mid in (rec.get("targets") or {}).items():
-        try:
-            res = api("deleteMessage", chat_id=uid, message_id=mid)
-        except Exception:
-            res = None
-        if res is None:
-            failed += 1
-        else:
-            deleted += 1
-        time.sleep(0.05)
+        # نسخه‌ی ۰.۳۴: آلبوم‌ها چند آیدی دارن (لیست)؛ تک‌خبرها یکی (عدد)
+        mids = mid if isinstance(mid, list) else [mid]
+        for m in mids:
+            try:
+                res = api("deleteMessage", chat_id=uid, message_id=m)
+            except Exception:
+                res = None
+            if res is None:
+                failed += 1
+            else:
+                deleted += 1
+            time.sleep(0.05)
     state["recent_forwards"] = [r for r in (state.get("recent_forwards") or []) if r is not rec]
     return deleted, failed, rec.get("title") or "خبر بدون متن"
 
@@ -2476,6 +2479,55 @@ def _roll_forward_day_if_stale(state):
         _archive_forward_day(state)
 
 
+def _targets_for_text(state, text, post_id=None):
+    """متن یه پست کانال رو دسته‌بندی می‌کنه و دنبال‌کننده‌هاش رو برمی‌گردونه:
+    (topics, targets, topic_targets) — topics بعد از حذف موضوع‌های ممنوعه؛
+    targets شامل کلمه‌های دلخواه هم هست (مستقل از موضوع)."""
+    topics = classify_post(text, state.get("custom_topics", {}),
+                           state.get("topic_extra_keywords", {}),
+                           state.get("disabled_topics", []),
+                           state.get("topic_removed_keywords", {}))
+    blocked_topics = {t for t in topics
+                      if _blocked_hit(text, (state.get("topic_blocked") or {}).get(t, []))}
+    if blocked_topics:
+        print(f"post {post_id} blocked for topics={sorted(blocked_topics)}")
+        topics = topics - blocked_topics
+    targets = set()
+    for uid, u in state.get("users", {}).items():
+        if set(u.get("topics", [])) & topics:
+            targets.add(uid)
+    topic_targets = set(targets)
+    # نسخه‌ی ۰.۲۴: کلمه‌های دلخواه — مستقل از موضوع؛ پستی که کلمه‌ی کاربر رو
+    # داشته باشه براش می‌رسه (حتی اگه موضوعش رو دنبال نکرده باشه یا پست اصلاً
+    # موضوعی نداشته باشه). یکی بودن targets یعنی دوبار فوروارد نمی‌شه.
+    for uid, u in state.get("users", {}).items():
+        if any(_keyword_hit(text, kw) for kw in u.get("keywords", [])):
+            targets.add(uid)
+    return topics, targets, topic_targets
+
+
+def _finish_forward(state, post_id, title, topics, targets, topic_targets, sent_uids, forwarded):
+    """بعد از فوروارد: ثبت در /recent، شمارنده‌های روزانه (به‌ازای هر خبر یکی،
+    نه هر گیرنده) و بایگانی روز در صورت لزوم."""
+    if not sent_uids:
+        return
+    _record_recent_forward(state, post_id, title, forwarded)
+    _roll_forward_day_if_stale(state)
+    counts = state.setdefault("topic_forward_counts", {})
+    users = state.get("users", {})
+    for t in topics:
+        if any(t in (users.get(uid) or {}).get("topics", []) for uid in sent_uids):
+            counts[t] = counts.get(t, 0) + 1
+    # نسخه‌ی ۰.۲۸: فورواردِ کلمه‌ی دلخواه — مثل موضوع‌ها، به‌ازای هر خبر یکی
+    # شمرده می‌شه، نه به‌ازای هر نفر؛ وگرنه یه خبر که به چند نفرِ کلمه‌ای
+    # برسه چند بار شمرده می‌شد. فقط کسایی که خبر رو فقط به‌خاطر کلمه‌شون
+    # گرفتن (نه از راه موضوع)؛ اگه هم موضوع و هم کلمه هم‌زمان بود، اون
+    # فوروارد برای موضوع شمرده می‌شه، نه برای کلمه.
+    kw_sent = sent_uids - topic_targets
+    if kw_sent:
+        state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + 1
+
+
 def handle_channel_post(state, post):
     """یه پست کانال رو دسته‌بندی می‌کنه و برای دنبال‌کننده‌های موضوعش فوروارد می‌کنه.
     True یعنی حافظه تغییر کرده. آیدی دنبال‌کننده‌ها هیچ‌وقت لاگ نمی‌شه."""
@@ -2493,29 +2545,8 @@ def handle_channel_post(state, post):
     if _is_night_post(text):
         # آخرین پیام روز کانال: آمار امروز بایگانی و صفر می‌شه (نسخه‌ی ۰.۳۰)
         _archive_forward_day(state)
-    topics = classify_post(text, state.get("custom_topics", {}),
-                           state.get("topic_extra_keywords", {}),
-                           state.get("disabled_topics", []),
-                           state.get("topic_removed_keywords", {}))
+    topics, targets, topic_targets = _targets_for_text(state, text, post_id)
     seen.append(post_id)
-    # نسخه‌ی ۰.۲۱: ممنوع‌ها برای هر موضوع جداست؛ پست فقط برای موضوع‌هایی که
-    # کلمه/ایموجی ممنوع‌شون رو داره فوروارد نمی‌شه (موضوع‌های دیگه می‌گیرنش).
-    blocked_topics = {t for t in topics
-                      if _blocked_hit(text, (state.get("topic_blocked") or {}).get(t, []))}
-    if blocked_topics:
-        print(f"post {post_id} blocked for topics={sorted(blocked_topics)}")
-        topics = topics - blocked_topics
-    targets = set()
-    for uid, u in state.get("users", {}).items():
-        if set(u.get("topics", [])) & topics:
-            targets.add(uid)
-    topic_targets = set(targets)
-    # نسخه‌ی ۰.۲۴: کلمه‌های دلخواه — مستقل از موضوع؛ پستی که کلمه‌ی کاربر رو
-    # داشته باشه براش می‌رسه (حتی اگه موضوعش رو دنبال نکرده باشه یا پست اصلاً
-    # موضوعی نداشته باشه). یکی بودن targets یعنی دوبار فوروارد نمی‌شه.
-    for uid, u in state.get("users", {}).items():
-        if any(_keyword_hit(text, kw) for kw in u.get("keywords", [])):
-            targets.add(uid)
     if not targets:
         return True   # پست معمولی یا کاملاً ممنوع: نه فوروارد می‌شه، نه دوباره بررسی می‌شه
     sent = 0
@@ -2529,24 +2560,59 @@ def handle_channel_post(state, post):
             _record_sent(state, uid, res.get("message_id"))
             forwarded[uid] = res.get("message_id")
         time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
-    if sent_uids:
-        _record_recent_forward(state, post_id, _recent_title(text), forwarded)
-        # برای هر موضوعی که دست‌کم یه دنبال‌کننده‌ش خبر رو گرفته، یکی به شمارنده‌ش اضافه می‌شه
-        _roll_forward_day_if_stale(state)
-        counts = state.setdefault("topic_forward_counts", {})
-        users = state.get("users", {})
-        for t in topics:
-            if any(t in (users.get(uid) or {}).get("topics", []) for uid in sent_uids):
-                counts[t] = counts.get(t, 0) + 1
-        # نسخه‌ی ۰.۲۸: فورواردِ کلمه‌ی دلخواه — مثل موضوع‌ها، به‌ازای هر خبر یکی
-        # شمرده می‌شه، نه به‌ازای هر نفر؛ وگرنه یه خبر که به چند نفرِ کلمه‌ای
-        # برسه چند بار شمرده می‌شد. فقط کسایی که خبر رو فقط به‌خاطر کلمه‌شون
-        # گرفتن (نه از راه موضوع)؛ اگه هم موضوع و هم کلمه هم‌زمان بود، اون
-        # فوروارد برای موضوع شمرده می‌شه، نه برای کلمه.
-        kw_sent = sent_uids - topic_targets
-        if kw_sent:
-            state["keyword_forward_count"] = state.get("keyword_forward_count", 0) + 1
+    _finish_forward(state, post_id, _recent_title(text), topics, targets, topic_targets, sent_uids, forwarded)
     print(f"forwarded post {post_id} topics={sorted(topics)} to {sent} follower(s)")
+    return True
+
+
+def handle_channel_album(state, posts):
+    """یه آلبوم کانال (چند عکس/ویدیو با یک کپشن) رو کامل فوروارد می‌کنه:
+    دسته‌بندی از روی کپشن عکس اول انجام می‌شه و همه‌ی عکس‌ها به همون
+    دنبال‌کننده‌ها می‌رسن (قبلاً فقط عکس اول می‌رفت؛ بقیه چون متنی نداشتن
+    بی‌صدا رد می‌شدن — گزارش ۱۹:۵۴، آلبوم لیست قیمت دیجیاتال). شمارنده‌ها
+    به‌ازای هر آلبوم یکی اضافه می‌شن، نه هر عکس؛ /recent هم کل آلبوم رو
+    یک خبر می‌بینه و حذفش همه‌ی عکس‌ها رو از چت گیرنده‌ها پاک می‌کنه."""
+    posts = [p for p in (posts or []) if isinstance(p, dict) and p.get("message_id")]
+    if not posts:
+        return False
+    first = posts[0]
+    chat = first.get("chat") or {}
+    username = (chat.get("username") or "").lstrip("@")
+    if username and username != CHANNEL.lstrip("@"):
+        return False
+    post_ids = [p["message_id"] for p in posts]
+    seen = state.setdefault("seen_posts", [])
+    if post_ids[0] in seen:
+        return False
+    text = first.get("text") or first.get("caption") or ""
+    if _is_night_post(text):
+        _archive_forward_day(state)
+    topics, targets, topic_targets = _targets_for_text(state, text, post_ids[0])
+    for pid in post_ids:
+        if pid not in seen:
+            seen.append(pid)
+    if not targets:
+        return True
+    sent = 0
+    sent_uids = set()
+    forwarded = {}
+    for uid in sorted(targets):
+        mids = []
+        for pid in post_ids:
+            res = forward_to(uid, pid)
+            if res:
+                mids.append(res.get("message_id"))
+                _record_sent(state, uid, res.get("message_id"))
+            time.sleep(0.05)   # که به سقف سرعت تلگرام نخوریم
+        if mids:
+            sent += 1
+            sent_uids.add(uid)
+            forwarded[uid] = mids
+    title = _recent_title(text)
+    if len(post_ids) > 1:
+        title = f"{title} ({_fa_digits(len(post_ids))} رسانه)"
+    _finish_forward(state, post_ids[0], title, topics, targets, topic_targets, sent_uids, forwarded)
+    print(f"forwarded album post {post_ids[0]} ({len(post_ids)} parts) topics={sorted(topics)} to {sent} follower(s)")
     return True
 
 
@@ -2554,21 +2620,50 @@ def process_updates(state):
     """getUpdates رو می‌خونه و پیام‌های اعضا + پست‌های کانال رو پردازش می‌کنه."""
     updates = api_get_updates(state.get("tg_offset", 0))
     changed = False
+    album = None  # آلبوم کانال در حال جمع‌شدن: [media_group_id, [posts]]
+
+    def flush_album():
+        nonlocal album, changed
+        if not album:
+            return
+        posts = album[1]
+        album = None
+        try:
+            if handle_channel_album(state, posts):
+                changed = True
+        except Exception as ex:
+            # نسخه‌ی ۰.۳۴: خطای آلبوم هم مثل بقیه‌ی به‌روزرسانی‌ها نباید صف رو قفل کنه
+            print("album رد شد:", repr(ex))
+
     for u in updates:
         state["tg_offset"] = u["update_id"] + 1
         changed = True
         try:
             if "message" in u:
+                flush_album()
                 if handle_message(state, u["message"]):
                     changed = True
             elif "channel_post" in u:
-                if handle_channel_post(state, u["channel_post"]):
-                    changed = True
+                post = u["channel_post"]
+                gid = post.get("media_group_id")
+                if gid:
+                    # عکس‌های یک آلبوم پشت سر هم می‌رسن و فقط اولی کپشن داره؛
+                    # جدا جدا پردازش بشن، بقیه چون متنی ندارن بی‌صدا رد می‌شن.
+                    if album is not None and album[0] != gid:
+                        flush_album()
+                    if album is None:
+                        album = [gid, []]
+                    album[1].append(post)
+                else:
+                    flush_album()
+                    if handle_channel_post(state, post):
+                        changed = True
         except Exception as ex:
             # نسخه‌ی ۰.۳۱: یه پیام/پست خراب نباید کل صف رو قفل کنه — رد می‌شه
             # و بقیه پردازش می‌شن. قبلاً استثنا کل دور رو می‌انداخت و چون
             # حافظه ذخیره نمی‌شد، همون پیام تا ابد دوباره امتحان می‌شد.
             print(f"update {u.get('update_id')} رد شد:", repr(ex))
+    flush_album()
     return changed
 
 
