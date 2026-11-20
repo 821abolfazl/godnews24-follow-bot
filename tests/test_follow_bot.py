@@ -231,7 +231,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-19-0.38")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-20-0.39")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -3247,6 +3247,74 @@ class FollowBotTest(unittest.TestCase):
             fb.TOKEN, fb.LOOP_MINUTES = orig_token, orig_loop
         self.assertEqual(calls["load"], 1)
         self.assertIs(seen.get("state"), loaded.get("state"))
+
+    # ---- 0.39: /resetstats — ریست دستی آمار ----
+    def test_resetstats_button_in_admin_keyboard_only(self):
+        self.send(ADMIN, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        rows = markup["keyboard"]
+        texts = [b["text"] for row in rows for b in row]
+        self.assertIn("🔄 ریست آمار", texts)
+        # دکمه‌ی ریست آمار در ردیف جدا و زیر «آمار هفته» است
+        stats_row = next(i for i, r in enumerate(rows) if any(b["text"] == "📊 آمار هفته" for b in r))
+        reset_row = next(i for i, r in enumerate(rows) if any(b["text"] == "🔄 ریست آمار" for b in r))
+        self.assertEqual(reset_row, stats_row + 1)
+        self.assertEqual([b["text"] for b in rows[reset_row]], ["🔄 ریست آمار"])
+        self.send(USER_A, "/start")
+        markup = json.loads(self.fake.sent[-1][2])
+        texts = [b["text"] for row in markup["keyboard"] for b in row]
+        self.assertNotIn("🔄 ریست آمار", texts)
+
+    def test_resetstats_admin_only(self):
+        self.state["topic_forward_counts"] = {"political": 5}
+        self.send(USER_A, "/resetstats")
+        self.assertIn("فقط برای ادمینه", self.last_text())
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 5})
+        self.assertNotIn(USER_A, self.state.get("pending", {}))
+
+    def test_resetstats_confirm_archives_and_zeroes(self):
+        self.state["topic_forward_day"] = tehran_date(1)
+        self.state["topic_forward_counts"] = {"political": 91, "gold": 7}
+        self.state["keyword_forward_count"] = 20
+        self.send(ADMIN, "/resetstats")
+        self.assertIn("۹۱", self.last_text())
+        self.assertIn("۲۰", self.last_text())
+        self.assertEqual(self.state.get("pending", {}).get(ADMIN, {}).get("cmd"), "/resetstats")
+        self.send(ADMIN, "✅ بله، ریست شود")
+        self.assertIn("صفر شد", self.last_text())
+        self.assertEqual(self.state["topic_forward_counts"], {})
+        self.assertEqual(self.state["keyword_forward_count"], 0)
+        self.assertEqual(self.state["topic_forward_day"], fb._today_tehran())
+        week = self.state.get("forward_stats_week", [])
+        self.assertEqual(len(week), 1)
+        self.assertEqual(week[0]["day"], tehran_date(1))
+        self.assertEqual(week[0]["counts"], {"political": 91, "gold": 7})
+        self.assertEqual(week[0]["keywords"], 20)
+
+    def test_resetstats_cancel_keeps_counts(self):
+        self.state["topic_forward_counts"] = {"political": 91}
+        self.state["keyword_forward_count"] = 20
+        self.send(ADMIN, "🔄 ریست آمار")
+        self.assertIn("۹۱", self.last_text())
+        self.send(ADMIN, "❌ لغو")
+        self.assertIn("لغو شد", self.last_text())
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 91})
+        self.assertEqual(self.state["keyword_forward_count"], 20)
+        self.assertNotIn(ADMIN, self.state.get("pending", {}))
+
+    def test_resetstats_wrong_text_reasks(self):
+        self.state["topic_forward_counts"] = {"political": 3}
+        self.send(ADMIN, "/resetstats")
+        self.send(ADMIN, "سلام")
+        self.assertIn("برای ریست", self.last_text())
+        self.assertEqual(self.state.get("pending", {}).get(ADMIN, {}).get("cmd"), "/resetstats")
+        self.assertEqual(self.state["topic_forward_counts"], {"political": 3})
+
+    def test_resetstats_in_admin_help(self):
+        self.send(ADMIN, "/help")
+        self.assertIn("/resetstats", self.last_text())
+        self.send(ADMIN, "/help /resetstats")
+        self.assertIn("ریست دستی", self.last_text())
 
 
 class FakeGit:

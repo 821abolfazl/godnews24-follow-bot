@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-19-0.38"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-20-0.39"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -555,6 +555,7 @@ ADMIN_BUTTONS = [
     [{"text": "🚫 کلمات ممنوع"}],
     [{"text": "🕐 خبرهای ساعت اخیر"}],
     [{"text": "📊 آمار هفته"}],
+    [{"text": "🔄 ریست آمار"}],
 ]
 
 # کیبورد موقع قدم‌های جادوگر (فقط لغو)
@@ -1046,6 +1047,7 @@ ADMIN_HELP_TEXT = (
     "/recent — خبرهایی که در دو ساعت اخیر برای دنبال‌کننده‌ها رفته (دکمه‌ی «🕐 خبرهای ساعت اخیر»)؛ از همون‌جا می‌تونی یه خبر رو از چت همه‌ی گیرنده‌هاش پاک کنی\n\n"
     "📈 آمار هفته\n"
     "/stats — آمار ارسالِ ۷ روز اخیر برای هر موضوع و کلمه‌ی دلخواه (دکمه‌ی «📊 آمار هفته»)؛ روز کانال با پست «شب بخیر» تموم می‌شه و آمار همون‌موقع بایگانی می‌شه\n\n"
+    "/resetstats — ریست دستی آمار فعلی (دکمه‌ی «🔄 ریست آمار»): آمار فعلی بایگانی و شمارنده‌ها صفر می‌شن؛ معمولاً با پست «شب بخیر» خودکار انجام می‌شه\n\n"
     "📜 تنظیمات\n"
     "/rules — تنظیمات فعلی ربات: موضوع‌ها، کلمه‌های کلیدی و کلمه/ایموجی‌های ممنوع هر موضوع (دکمه‌ی «📜 قوانین»)\n\n"
     "برای راهنمای یه دستور خاص بنویس: /help /broadcast"
@@ -1128,6 +1130,9 @@ COMMAND_HELP = {
                 "برای هر روز نشون می‌ده برای هر موضوع چندتا خبر فوروارد شده و چندتا خبر فقط به‌خاطر کلمه‌ی دلخواه رفته؛ "
                 "روز کانال با پست «شب بخیر» تموم می‌شه و آمار همون‌موقع بایگانی می‌شه، پس پست‌های بعد از نیمه‌شب و قبل از شب بخیر هنوز مال روز قبلی‌ان.\n\n"
                 "بنویس /stats یا دکمه‌ی «📊 آمار هفته» رو بزن."),
+    "/resetstats": ("ریست دستی آمار فعلی:\n\n"
+                    "آمار ارسال فعلی رو بایگانی می‌کنه و شمارنده‌ها رو صفر می‌کنه؛ معمولاً با پست «شب بخیر» خودکار انجام می‌شه.\n\n"
+                    "بنویس /resetstats یا دکمه‌ی «🔄 ریست آمار» رو بزن و تایید کن."),
     "/block": ("کلمه‌ها و ایموجی‌های ممنوع برای هر موضوع جدا:\n\n"
                "اگه پستی یه کلمه یا ایموجی ممنوعِ اون موضوع رو داشته باشه، برای دنبال‌کننده‌های همون موضوع فرستاده نمی‌شه؛ موضوع‌های دیگه همون پست رو می‌گیرن.\n\n"
                "• بنویس /block و موضوع رو انتخاب کن؛ بعد با دکمه‌ها اضافه یا حذف کن\n"
@@ -1731,6 +1736,17 @@ def _send_weekly_stats(state, chat_id):
     return True
 
 
+def _today_forward_summary(state):
+    """خلاصه‌ی آمار ارسال فعلی برای پیام تایید ریست دستی (فقط موضوع‌های با عدد > 0)."""
+    counts = state.get("topic_forward_counts", {}) or {}
+    kw = state.get("keyword_forward_count", 0)
+    parts = [f"{topic_label(state, k)} {_fa_digits(v)}"
+             for k, v in counts.items() if v]
+    if kw:
+        parts.append(f"🔍 کلمه‌ی دلخواه {_fa_digits(kw)}")
+    return " | ".join(parts) if parts else "صفر"
+
+
 def _follow(state, chat_id, topic):
     users = state.setdefault("users", {})
     u = users.setdefault(chat_id, {"topics": []})
@@ -1869,6 +1885,17 @@ def handle_message(state, msg):
         return _send_recent(state, chat_id)
     if text == "/stats" or text == "📊 آمار هفته":
         return _send_weekly_stats(state, chat_id)
+    if text == "/resetstats" or text == "🔄 ریست آمار":
+        if chat_id != ADMIN_CHAT_ID:
+            send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
+            return True
+        pending[chat_id] = {"cmd": "/resetstats", "step": "confirm", "ts": time.time()}
+        send_message(chat_id,
+                     f"آمار فعلی: {_today_forward_summary(state)}\n\n"
+                     "این آمار بایگانی و شمارنده‌ها صفر می‌شه. مطمئنی؟",
+                     reply_markup={"keyboard": [[{"text": "✅ بله، ریست شود"}], [{"text": "❌ لغو"}]],
+                                   "resize_keyboard": True})
+        return True
     if text == "📣 پیام به اعضا":
         if chat_id != ADMIN_CHAT_ID:
             send_message(chat_id, "این دستور فقط برای ادمینه.", reply_markup=main_keyboard(chat_id, state))
@@ -2236,6 +2263,21 @@ def handle_message(state, msg):
                 out += (f"\n⚠️ برای {_fa_digits(failed)} نفر پاک نشد "
                         "(بلاک کرده یا خودشون پاک کرده بودن).")
             send_message(chat_id, out, reply_markup=main_keyboard(chat_id, state))
+            return True
+        if cmd == "/resetstats":
+            if text == "✅ بله، ریست شود":
+                summary = _today_forward_summary(state)
+                _archive_forward_day(state)
+                send_message(chat_id,
+                             f"✅ آمار بایگانی شد ({summary}) و شمارنده‌ها صفر شد.",
+                             reply_markup=main_keyboard(chat_id, state))
+                return True
+            send_message(chat_id,
+                         f"آمار فعلی: {_today_forward_summary(state)}\n\n"
+                         "برای ریست «✅ بله، ریست شود» رو بزن یا «❌ لغو»:",
+                         reply_markup={"keyboard": [[{"text": "✅ بله، ریست شود"}], [{"text": "❌ لغو"}]],
+                                       "resize_keyboard": True})
+            pending[chat_id] = entry
             return True
         if cmd == "/block":
             if entry.get("step") == "topic":
