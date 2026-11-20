@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-20-0.39"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-20-0.40"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -406,6 +406,7 @@ SEND_MAX_SENDS_PER_DRAIN = 200   # هر برشِ تخلیه‌ی صف حداکث
 SEND_MAX_SECONDS_PER_DRAIN = 20  # و حداکثر چند ثانیه طول می‌کشه (تا نظرسنجی قفل نشه)
 SEND_QUEUE_MAX_ENTRIES = 500     # سقف خبرهای مانده در صف؛ بیشتر از این، قدیمی‌ترین‌ها حذف می‌شن
 SEND_QUEUE_MAX_AGE_SEC = 48 * 3600  # خبر کهنه‌تر از ۴۸ ساعت از صف حذف می‌شه
+ALBUM_QUIET_SECONDS = 5  # نسخه‌ی ۰.۴۰: آلبوم وقتی خالی می‌شه که این‌قدر ثانیه عکس تازه‌ای نرسیده باشه
 SEND_PAUSE_MAX_SEC = 300     # سقف مکث بعد از 429 تلگرام
 SWEEP_CHUNK = 500            # جاروی روزانه هر دور حداکثر چند کاربر چک می‌کنه
 
@@ -3054,19 +3055,23 @@ def handle_channel_album(state, posts):
 
 
 def process_updates(state):
-    """getUpdates رو می‌خونه و پیام‌های اعضا + پست‌های کانال رو پردازش می‌کنه."""
+    """getUpdates رو می‌خونه و پیام‌های اعضا + پست‌های کانال رو پردازش می‌کنه.
+    نسخه‌ی ۰.۴۰: آلبومِ در حال جمع‌شدن توی خود حافظه نگه داشته می‌شه
+    (pending_album)، نه متغیر محلی — چون عکس‌های یک آلبوم گاهی در چند دسته‌ی
+    getUpdates می‌رسن (گزارش ۱۳:۳۳، آلبوم لیست قیمت با ۴ عکس جدا جدا رفت) و
+    خالی کردنِ بافرِ محلی تهِ هر دسته، آلبوم رو تکه‌تکه می‌کرد. حالا بافر فقط
+    وقتی خالی می‌شه که مدتی عکس تازه‌ای نرسیده باشه، یا آلبوم دیگه‌ای /
+    پست تکی / پیام عضو بیاد."""
     updates = api_get_updates(state.get("tg_offset", 0))
     changed = False
-    album = None  # آلبوم کانال در حال جمع‌شدن: [media_group_id, [posts]]
 
     def flush_album():
-        nonlocal album, changed
-        if not album:
+        nonlocal changed
+        album = state.pop("pending_album", None)
+        if not album or not album.get("posts"):
             return
-        posts = album[1]
-        album = None
         try:
-            if handle_channel_album(state, posts):
+            if handle_channel_album(state, album["posts"]):
                 changed = True
         except Exception as ex:
             # نسخه‌ی ۰.۳۴: خطای آلبوم هم مثل بقیه‌ی به‌روزرسانی‌ها نباید صف رو قفل کنه
@@ -3086,11 +3091,19 @@ def process_updates(state):
                 if gid:
                     # عکس‌های یک آلبوم پشت سر هم می‌رسن و فقط اولی کپشن داره؛
                     # جدا جدا پردازش بشن، بقیه چون متنی ندارن بی‌صدا رد می‌شن.
-                    if album is not None and album[0] != gid:
+                    album = state.get("pending_album")
+                    if album is not None and album.get("gid") != gid:
                         flush_album()
+                        album = None
                     if album is None:
-                        album = [gid, []]
-                    album[1].append(post)
+                        album = {"gid": gid, "posts": [],
+                                 "updated": time.time()}
+                        state["pending_album"] = album
+                    if post.get("message_id") not in [p.get("message_id") for p in album["posts"]]:
+                        album["posts"].append(post)
+                    album["updated"] = time.time()
+                    if len(album["posts"]) >= 10:  # سقف تلگرام برای یک آلبوم
+                        flush_album()
                 else:
                     flush_album()
                     if handle_channel_post(state, post):
@@ -3100,7 +3113,13 @@ def process_updates(state):
             # و بقیه پردازش می‌شن. قبلاً استثنا کل دور رو می‌انداخت و چون
             # حافظه ذخیره نمی‌شد، همون پیام تا ابد دوباره امتحان می‌شد.
             print(f"update {u.get('update_id')} رد شد:", repr(ex))
-    flush_album()
+    # پایان دسته: فقط اگه مدتیه عکس تازه‌ای به آلبوم نرسیده، بفرستش؛ وگرنه
+    # بافر توی حافظه می‌مونه تا دسته‌ی بعد کاملش کنه (حتی اگه دسته‌ی بعد
+    # توی اجرای بعدی بیاد).
+    album = state.get("pending_album")
+    if album and album.get("posts"):
+        if time.time() - float(album.get("updated") or 0) >= ALBUM_QUIET_SECONDS:
+            flush_album()
     return changed
 
 

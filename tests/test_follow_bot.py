@@ -231,7 +231,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-20-0.39")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-20-0.40")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2879,6 +2879,12 @@ class FollowBotTest(unittest.TestCase):
             {"update_id": 5, "channel_post": make_album_post(202, "G2")},
         ]
         fb.process_updates(self.state)
+        # نسخه‌ی ۰.۴۰: آلبوم دوم تهِ دسته خالی نمی‌شه؛ اول G1 رفته و G2 هنوز بافره
+        self.assertEqual(sorted(self.fake.forwarded),
+                         sorted([(USER_A, 101), (USER_A, 102), (USER_A, 103)]))
+        self.state["pending_album"]["updated"] = time.time() - 10
+        self.fake.updates = []
+        fb.process_updates(self.state)
         self.assertEqual(sorted(self.fake.forwarded),
                          sorted([(USER_A, 101), (USER_A, 102), (USER_A, 103),
                                  (USER_B, 201), (USER_B, 202)]))
@@ -3315,6 +3321,104 @@ class FollowBotTest(unittest.TestCase):
         self.assertIn("/resetstats", self.last_text())
         self.send(ADMIN, "/help /resetstats")
         self.assertIn("ریست دستی", self.last_text())
+
+    # ---- 0.40: آلبومِ تکه‌تکه‌رسیده در چند دسته، یکجا فوروارد می‌شه ----
+    def _quiet_flush(self):
+        """بافر آلبوم رو قدیمی می‌کنه و با یه دسته‌ی خالی، خالی‌ش می‌کنه."""
+        if self.state.get("pending_album"):
+            self.state["pending_album"]["updated"] = time.time() - 10
+        self.fake.updates = []
+        fb.process_updates(self.state)
+
+    def test_album_split_across_batches_forwards_as_one(self):
+        # گزارش ۱۳:۳۳ — عکس‌های یک آلبوم در چند دسته‌ی getUpdates رسیدن و جدا جدا رفتن
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+        ]
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self.fake.updates = [
+            {"update_id": 2, "channel_post": make_album_post(102, "G1")},
+        ]
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self.fake.updates = [
+            {"update_id": 3, "channel_post": make_album_post(103, "G1")},
+        ]
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self._quiet_flush()
+        self.assertEqual(self.fake.forwarded,
+                         [(USER_A, 101), (USER_A, 102), (USER_A, 103)])
+        self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
+        self.assertIn("۳ رسانه", recs[0].get("title", ""))
+
+    def test_album_four_photos_price_list_one_forward(self):
+        # دقیقاً مورد گزارش‌شده: آلبوم ۴ عکسی لیست قیمت، هر عکس در یک دسته رسید
+        self.send(USER_A, "/follow سیاسی")
+        for i, mid in enumerate((101, 102, 103, 104)):
+            caption = "🔴 خبر مهم سیاسی" if i == 0 else None
+            self.fake.updates = [
+                {"update_id": i + 1, "channel_post": make_album_post(mid, "G1", caption)},
+            ]
+            fb.process_updates(self.state)
+            self.assertEqual(self.fake.forwarded, [])
+        self._quiet_flush()
+        self.assertEqual(self.fake.forwarded,
+                         [(USER_A, 101), (USER_A, 102), (USER_A, 103), (USER_A, 104)])
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
+        self.assertIn("۴ رسانه", recs[0].get("title", ""))
+        self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
+
+    def test_album_not_flushed_before_quiet(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+            {"update_id": 2, "channel_post": make_album_post(102, "G1")},
+        ]
+        fb.process_updates(self.state)
+        # تازه رسیده و هنوز ساکت نشده — هیچی نفرستاده
+        self.assertEqual(self.fake.forwarded, [])
+        self.assertIsNotNone(self.state.get("pending_album"))
+        # دسته‌ی خالیِ بی‌درنگ هم خالی‌ش نمی‌کنه
+        self.fake.updates = []
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self._quiet_flush()
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+
+    def test_album_intervening_message_flushes(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+        ]
+        fb.process_updates(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self.fake.updates = [
+            {"update_id": 2, "message": make_message(USER_A, "سلام")},
+        ]
+        fb.process_updates(self.state)
+        # پیام عضو آلبوم رو فوراً خالی می‌کنه (بدون صبر برای سکوت)
+        self.assertIn((USER_A, 101), self.fake.forwarded)
+
+    def test_album_duplicate_photo_deduped(self):
+        # عکس اول بعد از کرش دوباره خونده بشه، دو بار به بافر نمی‌ره
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+        ]
+        fb.process_updates(self.state)
+        self.fake.updates = [
+            {"update_id": 1, "channel_post": make_album_post(101, "G1", "🔴 خبر مهم سیاسی")},
+            {"update_id": 2, "channel_post": make_album_post(102, "G1")},
+        ]
+        fb.process_updates(self.state)
+        self._quiet_flush()
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
 
 
 class FakeGit:
