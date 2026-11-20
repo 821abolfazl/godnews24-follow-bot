@@ -69,7 +69,9 @@ class FakeAPI:
     def __init__(self):
         self.sent = []        # (chat_id, text, reply_markup?)
         self.forwarded = []   # (chat_id, post_id)
+        self.forwarded_groups = []  # (chat_id, (post_id, ...)) — forwardMessages یکجا
         self.forward_calls = []  # full forwardMessage data dicts
+        self.forward_group_calls = []  # full forwardMessages data dicts
         self.deleted = []     # (chat_id, message_id)
         self.delete_fail_ids = set()  # message_ids deleteMessage fails on
         self._mid = 0         # message ids grow like the real API
@@ -125,6 +127,32 @@ class FakeAPI:
             self.forwarded.append((chat_id, data.get("message_id")))
             self.forward_calls.append(dict(data))
             return {"message_id": self._next_id()}
+        if method == "forwardMessages":
+            chat_id = str(data.get("chat_id"))
+            errs = self.forward_errors.get(chat_id)
+            if errs:
+                kind, *rest = errs.pop(0)
+                if kind == "rate_limited":
+                    fb._set_last_api_error(
+                        {"status": 429, "retry_after": rest[0] if rest else 5})
+                    return None
+                if kind == "blocked":
+                    fb._set_last_api_error({"status": 403})
+                    return None
+                if kind == "timeout":
+                    fb._set_last_api_error({"status": "network"})
+                    return None
+                if kind == "server":
+                    fb._set_last_api_error({"status": 500})
+                    return None
+                # "pass": این فراخوانی عمداً موفق می‌شه
+            ids = data.get("message_ids")
+            if isinstance(ids, str):
+                ids = json.loads(ids)
+            ids = [int(x) for x in (ids or [])]
+            self.forwarded_groups.append((chat_id, tuple(ids)))
+            self.forward_group_calls.append(dict(data))
+            return [{"message_id": self._next_id()} for _ in ids]
         if method == "deleteMessage":
             mid = data.get("message_id")
             self.deleted.append((str(data.get("chat_id")), mid))
@@ -231,7 +259,7 @@ class FollowBotTest(unittest.TestCase):
 
     # ---- version / start / help ----
     def test_version(self):
-        self.assertEqual(fb.BOT_VERSION, "2026-11-20-0.40")
+        self.assertEqual(fb.BOT_VERSION, "2026-11-20-0.41")
 
     # ---- 0.12: add keywords to existing topics, inside /keywords ----
     def test_add_custom_keywords_appends_and_dedupes(self):
@@ -2856,8 +2884,9 @@ class FollowBotTest(unittest.TestCase):
                  make_album_post(102, "G1"),
                  make_album_post(103, "G1")]
         self.assertTrue(fb.handle_channel_album(self.state, posts))
-        self.assertEqual(self.fake.forwarded,
-                         [(USER_A, 101), (USER_A, 102), (USER_A, 103)])
+        # نسخه‌ی ۰.۴۱: آلبوم با یه forwardMessages می‌ره، نه سه forwardMessage تکی
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102, 103))])
+        self.assertEqual(self.fake.forwarded, [])
         for pid in (101, 102, 103):
             self.assertIn(pid, self.state.get("seen_posts", []))
         self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
@@ -2880,19 +2909,13 @@ class FollowBotTest(unittest.TestCase):
         ]
         fb.process_updates(self.state)
         # نسخه‌ی ۰.۴۰: آلبوم دوم تهِ دسته خالی نمی‌شه؛ اول G1 رفته و G2 هنوز بافره
-        self.assertEqual(sorted(self.fake.forwarded),
-                         sorted([(USER_A, 101), (USER_A, 102), (USER_A, 103)]))
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102, 103))])
         self.state["pending_album"]["updated"] = time.time() - 10
         self.fake.updates = []
         fb.process_updates(self.state)
-        self.assertEqual(sorted(self.fake.forwarded),
-                         sorted([(USER_A, 101), (USER_A, 102), (USER_A, 103),
-                                 (USER_B, 201), (USER_B, 202)]))
-        # بخش‌های هر آلبوم برای همون گیرنده به‌ترتیب می‌رسن
-        a_parts = [p for u, p in self.fake.forwarded if u == USER_A]
-        b_parts = [p for u, p in self.fake.forwarded if u == USER_B]
-        self.assertEqual(a_parts, [101, 102, 103])
-        self.assertEqual(b_parts, [201, 202])
+        self.assertEqual(self.fake.forwarded_groups,
+                         [(USER_A, (101, 102, 103)), (USER_B, (201, 202))])
+        self.assertEqual(self.fake.forwarded, [])
         counts = self.state.get("topic_forward_counts", {})
         self.assertEqual(counts.get("political"), 1)
         self.assertEqual(counts.get("sport"), 1)
@@ -2913,7 +2936,7 @@ class FollowBotTest(unittest.TestCase):
         posts = [make_album_post(101, "G1", "قیمت موبایل‌ها"),
                  make_album_post(102, "G1")]
         fb.handle_channel_album(self.state, posts)
-        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102))])
         self.assertEqual(self.state.get("keyword_forward_count"), 1)
 
     def test_album_delete_removes_all_parts(self):
@@ -3007,18 +3030,29 @@ class FollowBotTest(unittest.TestCase):
         self.assertEqual(self.state.get("send_queue"), [])
 
     def test_album_partial_progress_no_duplicate(self):
+        # ورودیِ نیمه‌کاره از نسخه‌ی قبل: بخش اول با forwardMessage رفته، بخش دوم مونده
         self.send(USER_A, "/follow سیاسی")
-        # بخش اول می‌رسه، بخش دوم دو بار تایم‌اوت می‌خوره و می‌مونه برای دور بعد
-        self.fake.forward_errors = {USER_A: [("pass",), ("timeout",), ("timeout",)]}
-        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
-                 make_album_post(102, "G1")]
-        fb.handle_channel_album(self.state, posts)
-        self.assertEqual(self.fake.forwarded, [(USER_A, 101)])
+        self.state.setdefault("send_queue", []).append({
+            "post_id": 101, "parts": [101, 102], "title": "خبر (۲ رسانه)",
+            "topics": ["political"], "topic_targets": [], "targets": [USER_A],
+            "pending": [USER_A], "delivered": {USER_A: [555]},
+            "progress": {USER_A: 1}, "ts": time.time(),
+        })
+        self.state["sent_messages"] = {USER_A: [555]}
+        # بخش دوم دو بار تایم‌اوت می‌خوره و می‌مونه برای دور بعد
+        self.fake.forward_errors = {USER_A: [("timeout",), ("timeout",)]}
+        fb._drain_send_queue(self.state)
+        self.assertEqual(self.fake.forwarded, [])
+        self.assertEqual(self.fake.forwarded_groups, [])
         self.assertEqual(len(self.state.get("send_queue") or []), 1)
         self.assertEqual(self.state["send_queue"][0]["progress"], {USER_A: 1})
-        # دور بعد فقط بخش دوم می‌رسه — بخش اول تکراری نمی‌ره
         fb._drain_send_queue(self.state)
-        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.fake.forwarded, [])
+        self.assertEqual(len(self.state.get("send_queue") or []), 1)
+        # دور سوم (خطا رفع شده) فقط بخش دوم می‌رسه — بخش اول تکراری نمی‌ره
+        fb._drain_send_queue(self.state)
+        self.assertEqual(self.fake.forwarded, [(USER_A, 102)])
+        self.assertEqual(self.fake.forwarded_groups, [])
         self.assertEqual(self.state.get("send_queue"), [])
         recs = fb._recent_forwards(self.state)
         self.assertEqual(len(recs), 1)
@@ -3349,8 +3383,7 @@ class FollowBotTest(unittest.TestCase):
         fb.process_updates(self.state)
         self.assertEqual(self.fake.forwarded, [])
         self._quiet_flush()
-        self.assertEqual(self.fake.forwarded,
-                         [(USER_A, 101), (USER_A, 102), (USER_A, 103)])
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102, 103))])
         self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
         recs = fb._recent_forwards(self.state)
         self.assertEqual(len(recs), 1)
@@ -3367,8 +3400,7 @@ class FollowBotTest(unittest.TestCase):
             fb.process_updates(self.state)
             self.assertEqual(self.fake.forwarded, [])
         self._quiet_flush()
-        self.assertEqual(self.fake.forwarded,
-                         [(USER_A, 101), (USER_A, 102), (USER_A, 103), (USER_A, 104)])
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102, 103, 104))])
         recs = fb._recent_forwards(self.state)
         self.assertEqual(len(recs), 1)
         self.assertIn("۴ رسانه", recs[0].get("title", ""))
@@ -3389,7 +3421,7 @@ class FollowBotTest(unittest.TestCase):
         fb.process_updates(self.state)
         self.assertEqual(self.fake.forwarded, [])
         self._quiet_flush()
-        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102))])
 
     def test_album_intervening_message_flushes(self):
         self.send(USER_A, "/follow سیاسی")
@@ -3418,7 +3450,56 @@ class FollowBotTest(unittest.TestCase):
         ]
         fb.process_updates(self.state)
         self._quiet_flush()
-        self.assertEqual(self.fake.forwarded, [(USER_A, 101), (USER_A, 102)])
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102))])
+
+    # ---- 0.41: آلبوم با یه forwardMessages می‌ره تا توی دایرکت هم یک آلبوم باشه ----
+    def test_album_uses_single_forward_messages_call(self):
+        # پست ۱۶۱۸۰ مسقط: لاگ «album (2 parts)» بود ولی عکس و فیلم جدا رسیدن،
+        # چون هر بخش با forwardMessage تکی می‌رفت
+        self.send(USER_A, "/follow سیاسی")
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1"),
+                 make_album_post(103, "G1")]
+        self.assertTrue(fb.handle_channel_album(self.state, posts))
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102, 103))])
+        self.assertEqual(self.fake.forwarded, [])
+        self.assertEqual(self.fake.forward_group_calls[0]["message_ids"],
+                         "[101, 102, 103]")
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
+        self.assertIn("۳ رسانه", recs[0].get("title", ""))
+        self.assertEqual(self.state.get("topic_forward_counts", {}).get("political"), 1)
+
+    def test_single_post_still_uses_forward_message(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.assertTrue(fb.handle_channel_post(
+            self.state, make_channel_post(101, "🔴 خبر مهم سیاسی")))
+        self.assertEqual(self.fake.forwarded, [(USER_A, 101)])
+        self.assertEqual(self.fake.forwarded_groups, [])
+
+    def test_album_forward_messages_403_removes_follower(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.forward_errors[USER_A] = [("blocked",)]
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1")]
+        self.assertTrue(fb.handle_channel_album(self.state, posts))
+        self.assertNotIn(USER_A, self.state.get("users", {}))
+        self.assertEqual(self.state.get("send_queue"), [])
+
+    def test_album_forward_messages_retry_then_success(self):
+        self.send(USER_A, "/follow سیاسی")
+        self.fake.forward_errors[USER_A] = [("timeout",), ("pass",)]
+        posts = [make_album_post(101, "G1", "🔴 خبر مهم سیاسی"),
+                 make_album_post(102, "G1")]
+        self.assertTrue(fb.handle_channel_album(self.state, posts))
+        # دور اول تایم‌اوت خورد — ورودی توی صف مونده و هیچ گروهی ثبت نشده
+        self.assertEqual(self.fake.forwarded_groups, [])
+        self.assertEqual(len(self.state.get("send_queue") or []), 1)
+        fb._drain_send_queue(self.state)
+        self.assertEqual(self.fake.forwarded_groups, [(USER_A, (101, 102))])
+        self.assertEqual(self.state.get("send_queue"), [])
+        recs = fb._recent_forwards(self.state)
+        self.assertEqual(len(recs), 1)
 
 
 class FakeGit:

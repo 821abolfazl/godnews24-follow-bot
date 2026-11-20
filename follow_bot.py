@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-BOT_VERSION = "2026-11-20-0.40"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
+BOT_VERSION = "2026-11-20-0.41"   # فقط توی لاگ و برای ادمین در /start نوشته می‌شه
 
 TOKEN = os.environ.get("FOLLOW_BOT_TOKEN") or ""
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID") or ""
@@ -2837,6 +2837,19 @@ def _forward_one(uid, pid):
     return res, err
 
 
+def _forward_many(uid, pids):
+    """چند پیام رو با یه فراخوانی forwardMessages می‌فرسته تا آلبوم یکجا برسه؛
+    برمی‌گردونه ([message, ...] یا None, err). message_ids باید رشته‌ی JSON باشه
+    (فرم‌دیتا آرایه‌ی خام رو قبول نمی‌کنه)."""
+    _acquire_send_slot()
+    res = api("forwardMessages", chat_id=uid, from_chat_id=CHANNEL,
+              message_ids=json.dumps([int(p) for p in pids]))
+    err = _get_last_api_error()
+    if err and err.get("status") == 429:
+        _note_send_pause(err.get("retry_after"))
+    return res, err
+
+
 def _broadcast_one(uid, text):
     """یه پیام برودکستِ تکی با رعایت سقف سرعت؛ برمی‌گردونه (res, err)."""
     _acquire_send_slot()
@@ -2871,9 +2884,27 @@ def _forward_recipient(entry, uid):
     (uid, وضعیت, [message_id, ...], پیشرفت)؛ وضعیت: "ok" / "blocked" / "failed".
     "blocked" یعنی کاربر ربات رو بلاک کرده (حذف می‌شه)؛ "failed" یعنی تایم‌اوت
     یا خطای سرور — گیرنده با همون پیشرفت توی صف می‌مونه تا دور بعد از همون
-    بخش ادامه بده (تکراری نمی‌ره)."""
+    بخش ادامه بده (تکراری نمی‌ره).
+    نسخه‌ی ۰.۴۱: آلبوم با یه فراخوانی forwardMessages می‌ره تا توی دایرکت
+    گیرنده هم یک آلبوم دیده بشه؛ forwardMessage تکی برای هر بخش، هر بخش رو
+    یه پیام جدا می‌کرد (پست ۱۶۱۸۰ مسقط: لاگ «album (2 parts)» بود ولی عکس
+    و فیلم جدا رسیدن). ورودیِ نیمه‌کاره از نسخه‌ی قبل (پیشرفت > ۰) از همون
+    بخش با forwardMessage تکی ادامه می‌ده."""
     parts = entry.get("parts") or []
     start = int((entry.get("progress") or {}).get(uid, 0))
+    if start == 0 and len(parts) > 1:
+        res, err = _forward_many(uid, parts)
+        if res:
+            got = [m.get("message_id") for m in res
+                   if isinstance(m, dict) and m.get("message_id")]
+            if len(got) == len(parts):
+                return uid, "ok", got, len(parts)
+            # بعضی بخش‌ها نرفتن — با همون پیشرفت می‌مونه تا دور بعد از همون‌جا ادامه بده
+            print(f"album partial forward: {len(got)}/{len(parts)} parts")
+            return uid, "failed", got, len(got)
+        if err and err.get("status") == 403:
+            return uid, "blocked", [], 0
+        return uid, "failed", [], 0
     mids = []
     i = start
     while i < len(parts):
